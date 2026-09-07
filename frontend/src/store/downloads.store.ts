@@ -39,6 +39,7 @@ const PROGRESS_INTERVAL_MS = 250;
 // ponytail: one download at a time; the backend proxies from a single IP anyway.
 let active: { id: string; task: FS.DownloadResumable; cancelled: boolean } | null = null;
 
+const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const fileFor = (id: string) => `${DIR}${id}.m4a`;
 
 export const useDownloadsStore = create<DownloadsState>()(
@@ -118,6 +119,7 @@ export const useDownloadsStore = create<DownloadsState>()(
         order: [],
 
         enqueue: (track) => {
+          if (!VIDEO_ID.test(track.id)) return 'exists';
           const existing = get().items[track.id];
           if (existing && existing.status !== 'failed') return 'exists';
           set((state) => ({

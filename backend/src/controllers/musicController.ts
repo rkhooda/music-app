@@ -32,6 +32,18 @@ interface SearchEntry {
 }
 
 const searchCache = new Map<string, SearchEntry>();
+const MAX_SEARCH_CACHE = 500;
+
+const rememberSearch = (key: string, entry: SearchEntry) => {
+  if (searchCache.size >= MAX_SEARCH_CACHE) {
+    const now = Date.now();
+    for (const [cachedKey, cached] of searchCache) {
+      if (!cached.pending && (!cached.expiresAt || cached.expiresAt < now)) searchCache.delete(cachedKey);
+    }
+    if (searchCache.size >= MAX_SEARCH_CACHE) searchCache.delete(searchCache.keys().next().value!);
+  }
+  searchCache.set(key, entry);
+};
 
 const runSearch = async (query: string): Promise<MusicSearchResult[]> => {
   try {
@@ -64,9 +76,9 @@ export const searchMusic = async (req: Request, res: Response, next: NextFunctio
       source = 'joined';
     } else {
       const pending = runSearch(raw);
-      searchCache.set(key, { pending });
+      rememberSearch(key, { pending });
       results = await pending;
-      searchCache.set(key, { results, expiresAt: Date.now() + config.search.ttlMs });
+      rememberSearch(key, { results, expiresAt: Date.now() + config.search.ttlMs });
       source = isYouTubeDataApiConfigured() ? 'data-api' : 'yt-dlp';
     }
 
