@@ -86,8 +86,12 @@ interface RequestOptions {
 const request = async <T>(path: string, options: RequestOptions = {}): Promise<T> => {
   const { method = 'GET', body, timeoutMs = 20_000, signal, retryOnNetworkError = false } = options;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
-  const onOuterAbort = () => controller.abort('aborted');
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onOuterAbort = () => controller.abort();
   signal?.addEventListener('abort', onOuterAbort);
 
   try {
@@ -113,9 +117,8 @@ const request = async <T>(path: string, options: RequestOptions = {}): Promise<T
     return payload as T;
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    const reason = controller.signal.aborted ? controller.signal.reason : null;
-    if (reason === 'aborted' || signal?.aborted) throw new ApiError('Request cancelled', 0, 'aborted');
-    if (reason === 'timeout') throw new ApiError('Request timed out', 0, 'timeout');
+    if (signal?.aborted) throw new ApiError('Request cancelled', 0, 'aborted');
+    if (timedOut) throw new ApiError('Request timed out', 0, 'timeout');
     if (retryOnNetworkError) {
       return request<T>(path, { ...options, retryOnNetworkError: false });
     }
@@ -166,7 +169,12 @@ export interface BackendHealth {
 }
 
 export const fetchHealth = async (): Promise<BackendHealth> => {
-  const response = await fetch(`${API_ORIGIN}/health`, { signal: AbortSignal.timeout(8_000) });
-  const payload = (await response.json()) as BackendHealth;
-  return payload;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(`${API_ORIGIN}/health`, { signal: controller.signal });
+    return (await response.json()) as BackendHealth;
+  } finally {
+    clearTimeout(timer);
+  }
 };

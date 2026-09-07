@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Dimensions, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -13,6 +13,8 @@ import { RootStackParamList } from '../navigation/types';
 import { selectDownloadedBytes, selectDownloadedTracks, useDownloadsStore } from '../store/downloads.store';
 import { usePlaylistStore } from '../store/playlist.store';
 import { Theme, radius, shadow, spacing, type, useStyles, useTheme } from '../theme';
+
+const CARD_SIZE = (Dimensions.get('window').width - spacing.xl * 2 - spacing.l) / 2;
 
 const LibraryScreen = () => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -85,7 +87,7 @@ const LibraryScreen = () => {
                 onPress={() => navigation.navigate('PlaylistDetail', { playlistId: playlist.id })}
                 style={({ pressed }) => [styles.playlistCard, pressed && { opacity: 0.85 }]}
               >
-                <Artwork uri={playlist.coverUri || playlist.tracks[0]?.thumbnail} size={999} radius={radius.m} style={styles.playlistArt} />
+                <Artwork uri={playlist.coverUri || playlist.tracks[0]?.thumbnail} size={CARD_SIZE} radius={radius.m} style={styles.playlistArt} />
                 <Text style={styles.cardTitle} numberOfLines={1}>
                   {playlist.title}
                 </Text>
@@ -157,8 +159,8 @@ const makeStyles = (theme: Theme) => ({
   newButton: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 4, minHeight: 32, paddingHorizontal: spacing.s },
   newButtonText: { ...type.footnote, fontWeight: '700' as const, color: theme.colors.accentStrong },
   grid: { flexDirection: 'row' as const, flexWrap: 'wrap' as const, paddingHorizontal: spacing.xl, gap: spacing.l },
-  playlistCard: { width: '47%' as const, gap: 4 },
-  playlistArt: { width: '100%' as const, aspectRatio: 1, height: undefined, marginBottom: spacing.xs, ...shadow(theme, 'soft') },
+  playlistCard: { width: CARD_SIZE, gap: 4 },
+  playlistArt: { marginBottom: spacing.xs, ...shadow(theme, 'soft') },
   backdrop: { ...StyleSheet.absoluteFillObject },
   dialogWrap: { flex: 1, justifyContent: 'center' as const, padding: spacing.xxl },
   dialog: {
