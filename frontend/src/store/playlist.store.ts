@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import { jsonFileStorage } from '../lib/storage';
 import { MusicTrack } from '../types/music';
 
 export interface Playlist {
@@ -6,58 +8,61 @@ export interface Playlist {
   title: string;
   tracks: MusicTrack[];
   coverUri?: string;
+  createdAt: number;
 }
 
 interface PlaylistState {
   playlists: Playlist[];
-  createPlaylist: (title?: string, coverUri?: string) => string;
+  createPlaylist: (title?: string) => string;
+  renamePlaylist: (playlistId: string, title: string) => void;
   addTrackToPlaylist: (playlistId: string, track: MusicTrack) => void;
+  removeTrackFromPlaylist: (playlistId: string, trackId: string) => void;
   setPlaylistCover: (playlistId: string, coverUri: string) => void;
   deletePlaylist: (playlistId: string) => void;
-  getPlaylistById: (playlistId: string) => Playlist | undefined;
 }
 
-export const usePlaylistStore = create<PlaylistState>((set, get) => ({
-  playlists: [],
-  createPlaylist: (title = 'New playlist', coverUri) => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    set((state) => ({
-      playlists: [...state.playlists, { id, title, tracks: [], coverUri }],
-    }));
-    return id;
-  },
-  addTrackToPlaylist: (playlistId, track) => {
-    set((state) => ({
-      playlists: state.playlists.map((playlist) => {
-        if (playlist.id !== playlistId) {
-          return playlist;
-        }
+const update = (playlists: Playlist[], playlistId: string, change: (playlist: Playlist) => Playlist) =>
+  playlists.map((playlist) => (playlist.id === playlistId ? change(playlist) : playlist));
 
-        if (playlist.tracks.some((item) => item.id === track.id)) {
-          return playlist;
-        }
+export const usePlaylistStore = create<PlaylistState>()(
+  persist(
+    (set) => ({
+      playlists: [],
+      createPlaylist: (title = 'New playlist') => {
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        set((state) => ({ playlists: [...state.playlists, { id, title, tracks: [], createdAt: Date.now() }] }));
+        return id;
+      },
+      renamePlaylist: (playlistId, title) => {
+        const trimmed = title.trim();
+        if (!trimmed) return;
+        set((state) => ({ playlists: update(state.playlists, playlistId, (playlist) => ({ ...playlist, title: trimmed })) }));
+      },
+      addTrackToPlaylist: (playlistId, track) => {
+        set((state) => ({
+          playlists: update(state.playlists, playlistId, (playlist) =>
+            playlist.tracks.some((item) => item.id === track.id) ? playlist : { ...playlist, tracks: [...playlist.tracks, track] },
+          ),
+        }));
+      },
+      removeTrackFromPlaylist: (playlistId, trackId) => {
+        set((state) => ({
+          playlists: update(state.playlists, playlistId, (playlist) => ({
+            ...playlist,
+            tracks: playlist.tracks.filter((item) => item.id !== trackId),
+          })),
+        }));
+      },
+      setPlaylistCover: (playlistId, coverUri) => {
+        set((state) => ({ playlists: update(state.playlists, playlistId, (playlist) => ({ ...playlist, coverUri })) }));
+      },
+      deletePlaylist: (playlistId) => {
+        set((state) => ({ playlists: state.playlists.filter((playlist) => playlist.id !== playlistId) }));
+      },
+    }),
+    { name: 'playlists', storage: jsonFileStorage() },
+  ),
+);
 
-        return {
-          ...playlist,
-          tracks: [...playlist.tracks, track],
-        };
-      }),
-    }));
-  },
-  setPlaylistCover: (playlistId, coverUri) => {
-    set((state) => ({
-      playlists: state.playlists.map((playlist) =>
-        playlist.id === playlistId ? { ...playlist, coverUri } : playlist,
-      ),
-    }));
-  },
-  deletePlaylist: (playlistId) => {
-    set((state) => ({
-      playlists: state.playlists.filter((playlist) => playlist.id !== playlistId),
-    }));
-  },
-  getPlaylistById: (playlistId) => {
-    const state = get();
-    return state.playlists.find((playlist) => playlist.id === playlistId);
-  },
-}));
+export const selectPlaylist = (playlistId: string) => (state: PlaylistState) =>
+  state.playlists.find((playlist) => playlist.id === playlistId);

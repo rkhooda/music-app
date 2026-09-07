@@ -1,365 +1,191 @@
 import React, { useState } from 'react';
-import {
-  Image,
-  Modal,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { Plus } from 'lucide-react-native';
-import { MiniPlayer } from '../components/MiniPlayer';
-import { BottomNavBar } from '../components/BottomNavBar';
+import { ArrowDownToLine, ChevronRight, ListMusic, Plus } from 'lucide-react-native';
+import { Artwork } from '../components/Artwork';
+import { EmptyState } from '../components/EmptyState';
+import { ScreenHeader } from '../components/ScreenHeader';
+import { useChromeInset } from '../components/AppChrome';
+import { formatBytes, pluralize } from '../lib/format';
 import { RootStackParamList } from '../navigation/types';
+import { selectDownloadedBytes, selectDownloadedTracks, useDownloadsStore } from '../store/downloads.store';
 import { usePlaylistStore } from '../store/playlist.store';
+import { Theme, radius, shadow, spacing, type, useStyles, useTheme } from '../theme';
 
 const LibraryScreen = () => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const playlists = usePlaylistStore((state) => state.playlists);
-  const createPlaylist = usePlaylistStore((state) => state.createPlaylist);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [playlistName, setPlaylistName] = useState('');
+  const theme = useTheme();
+  const styles = useStyles(makeStyles);
+  const bottomInset = useChromeInset();
+  const playlists = usePlaylistStore((s) => s.playlists);
+  const createPlaylist = usePlaylistStore((s) => s.createPlaylist);
+  const downloadedCount = useDownloadsStore((s) => selectDownloadedTracks(s).length);
+  const downloadedBytes = useDownloadsStore(selectDownloadedBytes);
+  const activeDownloads = useDownloadsStore((s) => s.order.filter((id) => ['queued', 'downloading'].includes(s.items[id]?.status)).length);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState('');
 
-  const handleCreatePlaylist = () => {
-    setModalVisible(true);
-  };
-
-  const handleCreateConfirm = () => {
-    const title = playlistName.trim() || `Playlist ${playlists.length + 1}`;
-    const id = createPlaylist(title);
-    setPlaylistName('');
-    setModalVisible(false);
+  const confirmCreate = () => {
+    const id = createPlaylist(name.trim() || `Playlist ${playlists.length + 1}`);
+    setName('');
+    setCreating(false);
     navigation.navigate('PlaylistDetail', { playlistId: id });
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
-      <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-        bounces
-      >
-        <View style={styles.header}>
-          <Text style={styles.title}>Library</Text>
-          <Text style={styles.subtitle}>Create and manage your playlists.</Text>
-        </View>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]} showsVerticalScrollIndicator={false}>
+        <ScreenHeader title="Library" large />
 
-        <TouchableOpacity
-          style={styles.createButton}
-          activeOpacity={0.85}
-          onPress={handleCreatePlaylist}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Downloads"
+          onPress={() => navigation.navigate('Downloads')}
+          style={({ pressed }) => [styles.downloadsCard, pressed && { opacity: 0.85 }]}
         >
-          <Plus size={16} color="#4f3e2c" />
-          <Text style={styles.createButtonText}>Create playlist</Text>
-        </TouchableOpacity>
-
-        <Modal
-          visible={modalVisible}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setModalVisible(false)}
-        >
-          <View style={styles.modalBackdrop}>
-            <View style={styles.modalCard}>
-              <Text style={styles.modalTitle}>New playlist</Text>
-              <Text style={styles.modalText}>Give your playlist a name and start building it.</Text>
-              <View style={styles.coverPreview}>
-                <View style={styles.coverPlaceholder}>
-                  <Text style={styles.coverPlaceholderText}>Cover</Text>
-                </View>
-              </View>
-              <TextInput
-                value={playlistName}
-                onChangeText={setPlaylistName}
-                placeholder="Playlist name"
-                placeholderTextColor="#b7a691"
-                style={styles.modalInput}
-              />
-              <View style={styles.modalActions}>
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  style={[styles.modalButton, styles.modalCancelButton]}
-                  onPress={() => {
-                    setModalVisible(false);
-                    setPlaylistName('');
-                  }}
-                >
-                  <Text style={styles.modalCancelText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  style={[styles.modalButton, styles.modalConfirmButton]}
-                  onPress={handleCreateConfirm}
-                >
-                  <Text style={styles.modalConfirmText}>Create</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
+          <View style={styles.downloadsIcon}>
+            <ArrowDownToLine size={20} color={theme.colors.onAccent} strokeWidth={2.4} />
           </View>
-        </Modal>
-
-        {playlists.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyTitle}>No playlists yet</Text>
-            <Text style={styles.emptyText}>
-              Create your first playlist and add songs from the search section.
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cardTitle}>Downloads</Text>
+            <Text style={styles.cardMeta}>
+              {downloadedCount > 0 ? `${pluralize(downloadedCount, 'song')} · ${formatBytes(downloadedBytes)}` : 'Available offline'}
+              {activeDownloads > 0 ? ` · ${activeDownloads} in progress` : ''}
             </Text>
           </View>
+          <ChevronRight size={18} color={theme.colors.inkMuted} strokeWidth={2.2} />
+        </Pressable>
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Playlists</Text>
+          <Pressable onPress={() => setCreating(true)} hitSlop={8} accessibilityLabel="New playlist" style={styles.newButton}>
+            <Plus size={16} color={theme.colors.accentStrong} strokeWidth={2.6} />
+            <Text style={styles.newButtonText}>New</Text>
+          </Pressable>
+        </View>
+
+        {playlists.length === 0 ? (
+          <EmptyState
+            icon={<ListMusic size={32} color={theme.colors.inkMuted} strokeWidth={1.6} />}
+            title="No playlists yet"
+            message="Long-press any song to add it to a playlist, or create one here."
+            actionLabel="Create playlist"
+            onAction={() => setCreating(true)}
+            compact
+          />
         ) : (
           <View style={styles.grid}>
             {playlists.map((playlist) => (
-              <TouchableOpacity
+              <Pressable
                 key={playlist.id}
-                style={styles.playlistCard}
-                activeOpacity={0.9}
+                accessibilityRole="button"
+                accessibilityLabel={playlist.title}
                 onPress={() => navigation.navigate('PlaylistDetail', { playlistId: playlist.id })}
+                style={({ pressed }) => [styles.playlistCard, pressed && { opacity: 0.85 }]}
               >
-                {playlist.coverUri ? (
-                  <View style={styles.cardArtwork}>
-                    <Image source={{ uri: playlist.coverUri }} style={styles.coverImage} />
-                  </View>
-                ) : (
-                  <View style={styles.cardArtwork}>
-                    <View style={styles.cardCoverPlaceholder}>
-                      <Text style={styles.cardCoverText}>Cover</Text>
-                    </View>
-                  </View>
-                )}
-                <Text style={styles.cardTitle}>{playlist.title}</Text>
-                <Text style={styles.cardSubtitle}>
-                  {playlist.tracks.length} song{playlist.tracks.length !== 1 ? 's' : ''}
+                <Artwork uri={playlist.coverUri || playlist.tracks[0]?.thumbnail} size={999} radius={radius.m} style={styles.playlistArt} />
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  {playlist.title}
                 </Text>
-              </TouchableOpacity>
+                <Text style={styles.cardMeta}>{pluralize(playlist.tracks.length, 'song')}</Text>
+              </Pressable>
             ))}
           </View>
         )}
       </ScrollView>
 
-      <MiniPlayer />
-      <BottomNavBar />
+      <Modal visible={creating} transparent animationType="fade" statusBarTranslucent onRequestClose={() => setCreating(false)}>
+        <Pressable style={[styles.backdrop, { backgroundColor: theme.colors.scrim }]} onPress={() => setCreating(false)} />
+        <View style={styles.dialogWrap} pointerEvents="box-none">
+          <View style={styles.dialog}>
+            <Text style={styles.dialogTitle}>New playlist</Text>
+            <TextInput
+              value={name}
+              onChangeText={setName}
+              placeholder="Playlist name"
+              placeholderTextColor={theme.colors.inkMuted}
+              style={styles.dialogInput}
+              selectionColor={theme.colors.accentStrong}
+              autoFocus
+              returnKeyType="done"
+              onSubmitEditing={confirmCreate}
+            />
+            <View style={styles.dialogActions}>
+              <Pressable onPress={() => setCreating(false)} style={({ pressed }) => [styles.dialogButton, pressed && { opacity: 0.6 }]}>
+                <Text style={styles.dialogCancel}>Cancel</Text>
+              </Pressable>
+              <Pressable onPress={confirmCreate} style={({ pressed }) => [styles.dialogButton, styles.dialogPrimary, pressed && { opacity: 0.8 }]}>
+                <Text style={styles.dialogPrimaryText}>Create</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f4eee3',
+const makeStyles = (theme: Theme) => ({
+  container: { flex: 1, backgroundColor: theme.colors.bg },
+  content: { paddingTop: spacing.s },
+  downloadsCard: {
+    marginHorizontal: spacing.xl,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: spacing.m,
+    padding: spacing.m,
+    borderRadius: radius.l,
+    backgroundColor: theme.colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.glassBorder,
+    ...shadow(theme, 'soft'),
   },
-  scrollView: {
-    flex: 1,
+  downloadsIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: theme.colors.accent, alignItems: 'center' as const, justifyContent: 'center' as const },
+  cardTitle: { ...type.headline, color: theme.colors.ink },
+  cardMeta: { ...type.footnote, color: theme.colors.inkMuted, marginTop: 2 },
+  sectionHeader: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    paddingHorizontal: spacing.xl,
+    marginTop: spacing.xxl,
+    marginBottom: spacing.m,
   },
-  scrollContent: {
-    padding: 24,
-    paddingBottom: 180,
+  sectionTitle: { ...type.eyebrow, color: theme.colors.inkMuted },
+  newButton: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 4, minHeight: 32, paddingHorizontal: spacing.s },
+  newButtonText: { ...type.footnote, fontWeight: '700' as const, color: theme.colors.accentStrong },
+  grid: { flexDirection: 'row' as const, flexWrap: 'wrap' as const, paddingHorizontal: spacing.xl, gap: spacing.l },
+  playlistCard: { width: '47%' as const, gap: 4 },
+  playlistArt: { width: '100%' as const, aspectRatio: 1, height: undefined, marginBottom: spacing.xs, ...shadow(theme, 'soft') },
+  backdrop: { ...StyleSheet.absoluteFillObject },
+  dialogWrap: { flex: 1, justifyContent: 'center' as const, padding: spacing.xxl },
+  dialog: {
+    backgroundColor: theme.colors.surfaceStrong,
+    borderRadius: radius.xl,
+    padding: spacing.xxl,
+    gap: spacing.l,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.glassBorder,
+    ...shadow(theme, 'float'),
   },
-  header: {
-    marginBottom: 18,
-  },
-  title: {
-    fontSize: 32,
-    fontWeight: '700',
-    color: '#3f3527',
-    marginBottom: 8,
-  },
-  subtitle: {
-    fontSize: 15,
-    color: '#8b7f6e',
-    lineHeight: 22,
-  },
-  createButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#faf5ec',
-    borderRadius: 16,
+  dialogTitle: { ...type.title, color: theme.colors.ink },
+  dialogInput: {
+    height: 48,
+    borderRadius: radius.m,
+    backgroundColor: theme.colors.surface,
     borderWidth: 1,
-    borderColor: 'rgba(187, 171, 145, 0.3)',
-    paddingVertical: 14,
-    marginBottom: 20,
-    shadowColor: '#d1bfaa',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 4,
+    borderColor: theme.colors.line,
+    paddingHorizontal: spacing.l,
+    ...type.body,
+    color: theme.colors.ink,
   },
-  createButtonText: {
-    marginLeft: 10,
-    color: '#4f3e2c',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 56,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#3f3527',
-    marginBottom: 8,
-  },
-  emptyText: {
-    fontSize: 14,
-    color: '#8b7f6e',
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
-  playlistCard: {
-    width: '48%',
-    aspectRatio: 1,
-    borderRadius: 22,
-    backgroundColor: '#faf5ec',
-    borderWidth: 1,
-    borderColor: 'rgba(187, 171, 145, 0.2)',
-    padding: 16,
-    justifyContent: 'space-between',
-    shadowColor: '#d1bfaa',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    elevation: 6,
-    marginBottom: 16,
-  },
-  cardArtwork: {
-    flex: 1,
-    borderRadius: 18,
-    backgroundColor: '#e7dccf',
-    marginBottom: 16,
-    overflow: 'hidden',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  coverImage: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
-  cardCoverPlaceholder: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    width: '100%',
-    height: '100%',
-  },
-  cardCoverText: {
-    color: '#85715f',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#4b3d31',
-  },
-  cardSubtitle: {
-    marginTop: 6,
-    fontSize: 13,
-    color: '#a58f7a',
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(26, 22, 16, 0.35)',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  modalCard: {
-    backgroundColor: '#fbf6ef',
-    borderRadius: 24,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: 'rgba(179, 158, 127, 0.16)',
-    shadowColor: '#c5b49d',
-    shadowOffset: { width: 0, height: 14 },
-    shadowOpacity: 0.12,
-    shadowRadius: 18,
-    elevation: 8,
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#3f3527',
-    marginBottom: 10,
-  },
-  modalText: {
-    color: '#7e6f59',
-    fontSize: 14,
-    marginBottom: 20,
-    lineHeight: 20,
-  },
-  coverPreview: {
-    height: 160,
-    borderRadius: 24,
-    backgroundColor: '#e7dccf',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 18,
-  },
-  coverPlaceholder: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.42)',
-  },
-  coverPlaceholderText: {
-    color: '#8b7f6e',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  modalInput: {
-    backgroundColor: '#fffdf7',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(180, 164, 143, 0.35)',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    color: '#3f3527',
-    marginBottom: 20,
-    fontSize: 15,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  modalButton: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 16,
-    alignItems: 'center',
-  },
-  modalCancelButton: {
-    backgroundColor: '#f1e8dc',
-    marginRight: 12,
-  },
-  modalConfirmButton: {
-    backgroundColor: '#d4a574',
-  },
-  modalCancelText: {
-    color: '#7f705c',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  modalConfirmText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 15,
-  },
+  dialogActions: { flexDirection: 'row' as const, justifyContent: 'flex-end' as const, gap: spacing.s },
+  dialogButton: { minHeight: 44, paddingHorizontal: spacing.xl, borderRadius: radius.pill, alignItems: 'center' as const, justifyContent: 'center' as const },
+  dialogPrimary: { backgroundColor: theme.colors.accent },
+  dialogCancel: { ...type.callout, fontWeight: '600' as const, color: theme.colors.inkSoft },
+  dialogPrimaryText: { ...type.callout, fontWeight: '700' as const, color: theme.colors.onAccent },
 });
 
 export default LibraryScreen;

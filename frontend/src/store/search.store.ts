@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import { jsonFileStorage } from '../lib/storage';
 
 interface SearchState {
   searchHistory: string[];
@@ -7,25 +9,22 @@ interface SearchState {
   clearSearchHistory: () => void;
 }
 
-export const useSearchStore = create<SearchState>((set) => ({
-  searchHistory: [],
-  addSearchQuery: (query: string) => {
-    set((state) => {
-      const trimmed = query.trim();
-      if (!trimmed) return state;
+const MAX_HISTORY = 15;
 
-      const filtered = state.searchHistory.filter((item) => item !== trimmed);
-      return {
-        searchHistory: [trimmed, ...filtered].slice(0, 15),
-      };
-    });
-  },
-  removeSearchQuery: (query: string) => {
-    set((state) => ({
-      searchHistory: state.searchHistory.filter((item) => item !== query),
-    }));
-  },
-  clearSearchHistory: () => {
-    set({ searchHistory: [] });
-  },
-}));
+export const useSearchStore = create<SearchState>()(
+  persist(
+    (set) => ({
+      searchHistory: [],
+      addSearchQuery: (query) => {
+        const trimmed = query.trim();
+        if (!trimmed) return;
+        set((state) => ({
+          searchHistory: [trimmed, ...state.searchHistory.filter((item) => item.toLowerCase() !== trimmed.toLowerCase())].slice(0, MAX_HISTORY),
+        }));
+      },
+      removeSearchQuery: (query) => set((state) => ({ searchHistory: state.searchHistory.filter((item) => item !== query) })),
+      clearSearchHistory: () => set({ searchHistory: [] }),
+    }),
+    { name: 'search-history', storage: jsonFileStorage() },
+  ),
+);

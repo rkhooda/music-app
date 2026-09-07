@@ -1,503 +1,218 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
-import {
-  View,
-  StyleSheet,
-  TextInput,
-  TouchableOpacity,
-  ScrollView,
-  Text,
-  ActivityIndicator,
-  Keyboard,
-} from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Keyboard, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
-import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, Search, X, Trash2, Clock } from 'lucide-react-native';
-import { RootStackParamList } from '../navigation/types';
-import { getStreamUrl, searchMusic } from '../api/music';
-import { useSearchStore } from '../store/search.store';
+import { ChevronLeft, Clock, CloudOff, Search, X } from 'lucide-react-native';
+import { useNavigation } from '@react-navigation/native';
+import { describeError, searchMusic } from '../api/client';
+import { EmptyState } from '../components/EmptyState';
+import { IconButton } from '../components/IconButton';
+import { TrackActionsSheet } from '../components/TrackActionsSheet';
+import { TrackRow } from '../components/TrackRow';
+import { useChromeInset } from '../components/AppChrome';
+import { useDownloadsStore } from '../store/downloads.store';
 import { usePlayerStore } from '../store/player.store';
+import { useSearchStore } from '../store/search.store';
+import { Theme, radius, spacing, type, useStyles, useTheme } from '../theme';
 import { MusicTrack } from '../types/music';
-import { theme } from '../theme';
-import { MiniPlayer } from '../components/MiniPlayer';
-import { BottomNavBar } from '../components/BottomNavBar';
+
+const DEBOUNCE_MS = 300;
 
 const SearchScreen = () => {
-  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [debouncedQuery, setDebouncedQuery] = useState('');
-  const searchInputRef = useRef<TextInput>(null);
+  const navigation = useNavigation();
+  const theme = useTheme();
+  const styles = useStyles(makeStyles);
+  const bottomInset = useChromeInset();
+  const inputRef = useRef<TextInput>(null);
+  const [text, setText] = useState('');
+  const [query, setQuery] = useState('');
+  const [sheetTrack, setSheetTrack] = useState<MusicTrack | null>(null);
+
   const playTrack = usePlayerStore((s) => s.playTrack);
-  const currentTrack = usePlayerStore((s) => s.currentTrack);
+  const currentTrackId = usePlayerStore((s) => s.currentTrack?.id);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const loadingTrackId = usePlayerStore((s) => s.loadingTrackId);
-  const clearPlayerError = usePlayerStore((s) => s.clearError);
-  const [prefetchedTrackIds, setPrefetchedTrackIds] = useState<Set<string>>(new Set());
-
-  const markPrefetched = (trackId: string) => {
-    setPrefetchedTrackIds((prev) => new Set(prev).add(trackId));
-  };
-
+  const playerError = usePlayerStore((s) => s.error);
+  const downloads = useDownloadsStore((s) => s.items);
   const { searchHistory, addSearchQuery, removeSearchQuery, clearSearchHistory } = useSearchStore();
 
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      searchInputRef.current?.focus();
-    }, 100);
-
-    return () => clearTimeout(timeout);
+    const timer = setTimeout(() => inputRef.current?.focus(), 120);
+    return () => clearTimeout(timer);
   }, []);
 
-  // Debounce search query
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      setDebouncedQuery(searchQuery.trim());
-    }, 350);
+    const timer = setTimeout(() => setQuery(text.trim()), DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [text]);
 
-    return () => clearTimeout(timeout);
-  }, [searchQuery]);
-
-  const searchResults = useQuery({
-    queryKey: ['music-search', debouncedQuery],
-    queryFn: ({ signal }) => searchMusic(debouncedQuery, signal),
-    enabled: debouncedQuery.length > 0,
-    retry: 0,
-    staleTime: 1000 * 60 * 5,
-    gcTime: 1000 * 60 * 10,
+  const results = useQuery({
+    queryKey: ['music-search', query.toLowerCase()],
+    queryFn: ({ signal }) => searchMusic(query, signal),
+    enabled: query.length > 0,
   });
+  const tracks = results.data ?? [];
 
-  const topTracks = useMemo(() => {
-    return searchResults.data || [];
-  }, [searchResults.data]);
-
-  const handleTrackPress = async (track: MusicTrack) => {
-    clearPlayerError();
-    addSearchQuery(debouncedQuery);
-
-    if (!prefetchedTrackIds.has(track.id)) {
-      void getStreamUrl(track.id).catch(() => undefined);
-      markPrefetched(track.id);
-    }
-
-    const currentIndex = topTracks.findIndex((item) => item.id === track.id);
-    const nextResults = topTracks.slice(currentIndex + 1, currentIndex + 3);
-    nextResults.forEach((result) => {
-      if (!prefetchedTrackIds.has(result.id)) {
-        void getStreamUrl(result.id).catch(() => undefined);
-        markPrefetched(result.id);
-      }
-    });
-
-    await playTrack(track, topTracks);
+  const submit = (value: string) => {
+    setText(value);
+    setQuery(value.trim());
+    Keyboard.dismiss();
   };
 
-  const handleHistoryPress = (query: string) => {
-    setSearchQuery(query);
-    setDebouncedQuery(query);
-    searchInputRef.current?.blur();
+  const handlePlay = (track: MusicTrack) => {
+    if (query) addSearchQuery(query);
+    Keyboard.dismiss();
+    void playTrack(track, tracks);
   };
 
-  const handleClearInput = () => {
-    setSearchQuery('');
-    setDebouncedQuery('');
-    searchInputRef.current?.focus();
-  };
-
-  const isLoading = searchResults.isLoading && debouncedQuery.length > 0;
-  const hasResults = topTracks.length > 0 && debouncedQuery.length > 0;
-  const showHistory = !debouncedQuery && searchHistory.length > 0;
+  const showHistory = query.length === 0 && searchHistory.length > 0;
 
   return (
-    <View style={styles.container}>
-      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            activeOpacity={0.7}
-            style={styles.backButton}
-            onPress={() => {
-              Keyboard.dismiss();
-              navigation.goBack();
-            }}
-          >
-            <ChevronLeft size={24} color="#b4a48f" strokeWidth={2.5} />
-          </TouchableOpacity>
-
-          {/* Search Input */}
-          <View style={styles.searchContainer}>
-            <Search size={18} color="#b7a691" strokeWidth={2} />
-            <TextInput
-              ref={searchInputRef}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholder="Search songs, artists..."
-              placeholderTextColor="#c9bcaa"
-              style={styles.searchInput}
-              selectionColor="#b69772"
-              autoCapitalize="none"
-              autoCorrect={false}
-              returnKeyType="search"
-              keyboardType="default"
-              returnKeyLabel="Search"
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity
-                activeOpacity={0.7}
-                onPress={handleClearInput}
-                style={styles.clearButton}
-              >
-                <X size={18} color="#b7a691" strokeWidth={2} />
-              </TouchableOpacity>
-            )}
-          </View>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <View style={styles.header}>
+        <IconButton label="Back" onPress={() => navigation.goBack()} size={40}>
+          <ChevronLeft size={22} color={theme.colors.ink} strokeWidth={2.4} />
+        </IconButton>
+        <View style={styles.field}>
+          <Search size={18} color={theme.colors.inkMuted} strokeWidth={2} />
+          <TextInput
+            ref={inputRef}
+            value={text}
+            onChangeText={setText}
+            onSubmitEditing={() => submit(text)}
+            placeholder="Songs, artists, albums"
+            placeholderTextColor={theme.colors.inkMuted}
+            style={styles.input}
+            selectionColor={theme.colors.accentStrong}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+            accessibilityLabel="Search"
+          />
+          {text.length > 0 ? (
+            <Pressable onPress={() => submit('')} hitSlop={10} accessibilityLabel="Clear search">
+              <X size={18} color={theme.colors.inkMuted} strokeWidth={2.2} />
+            </Pressable>
+          ) : null}
         </View>
+      </View>
 
-        {/* Content */}
-        <ScrollView
-          style={styles.scrollView}
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-          bounces
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="on-drag"
-        >
-          {/* Search History Section */}
-          {showHistory && (
-            <View style={styles.historySection}>
-              <View style={styles.historyHeader}>
-                <View style={styles.historyTitleRow}>
-                  <Clock size={16} color="#b7a691" strokeWidth={2} />
-                  <Text style={styles.historyTitle}>Recent Searches</Text>
-                </View>
-                <TouchableOpacity
-                  activeOpacity={0.7}
-                  onPress={clearSearchHistory}
-                  style={styles.clearHistoryButton}
-                >
-                  <Trash2 size={14} color="#b7a691" strokeWidth={2} />
-                  <Text style={styles.clearHistoryText}>Clear</Text>
-                </TouchableOpacity>
-              </View>
+      <ScrollView
+        contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        showsVerticalScrollIndicator={false}
+      >
+        {playerError ? (
+          <View style={styles.errorStrip}>
+            <Text style={styles.errorText}>{playerError}</Text>
+          </View>
+        ) : null}
 
-              <View style={styles.historyList}>
-                {searchHistory.map((query, index) => (
-                  <View key={index} style={styles.historyItemWrapper}>
-                    <TouchableOpacity
-                      activeOpacity={0.6}
-                      style={styles.historyItem}
-                      onPress={() => handleHistoryPress(query)}
-                    >
-                      <View style={styles.historyItemContent}>
-                        <Clock size={14} color="#d4a574" strokeWidth={2} />
-                        <Text style={styles.historyItemText}>{query}</Text>
-                      </View>
-                      <TouchableOpacity
-                        activeOpacity={0.7}
-                        onPress={() => removeSearchQuery(query)}
-                      >
-                        <X size={16} color="#b7a691" strokeWidth={2} />
-                      </TouchableOpacity>
-                    </TouchableOpacity>
-                  </View>
-                ))}
-              </View>
+        {showHistory ? (
+          <View>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Recent</Text>
+              <Pressable onPress={clearSearchHistory} hitSlop={8} accessibilityLabel="Clear recent searches">
+                <Text style={styles.sectionAction}>Clear</Text>
+              </Pressable>
             </View>
-          )}
+            {searchHistory.map((item) => (
+              <Pressable
+                key={item}
+                onPress={() => submit(item)}
+                android_ripple={{ color: theme.colors.line }}
+                style={({ pressed }) => [styles.historyRow, pressed && { opacity: 0.6 }]}
+              >
+                <Clock size={16} color={theme.colors.inkMuted} strokeWidth={2} />
+                <Text style={styles.historyText} numberOfLines={1}>
+                  {item}
+                </Text>
+                <Pressable onPress={() => removeSearchQuery(item)} hitSlop={12} accessibilityLabel={`Remove ${item}`} style={styles.historyRemove}>
+                  <X size={16} color={theme.colors.inkMuted} strokeWidth={2} />
+                </Pressable>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
 
-          {/* Loading State */}
-          {isLoading && (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#d4a574" />
-              <Text style={styles.loadingText}>Searching for "{debouncedQuery}"...</Text>
-            </View>
-          )}
+        {query.length > 0 && results.isPending ? (
+          <View style={styles.loading}>
+            <ActivityIndicator color={theme.colors.accentStrong} />
+            <Text style={styles.loadingText}>Searching…</Text>
+          </View>
+        ) : null}
 
-          {/* Search Results */}
-          {hasResults && (
-            <View style={styles.resultsSection}>
-              <Text style={styles.resultsTitle}>
-                {topTracks.length} result{topTracks.length !== 1 ? 's' : ''} for "{debouncedQuery}"
-              </Text>
+        {query.length > 0 && results.isError ? (
+          <EmptyState
+            tone="error"
+            icon={<CloudOff size={28} color={theme.colors.danger} strokeWidth={1.8} />}
+            title="Search failed"
+            message={describeError(results.error)}
+            actionLabel="Try again"
+            onAction={() => void results.refetch()}
+          />
+        ) : null}
 
-              <View style={styles.resultsList}>
-                {topTracks.map((track) => (
-                  <TouchableOpacity
-                    key={track.id}
-                    activeOpacity={0.7}
-                    style={[
-                      styles.trackItem,
-                      currentTrack?.id === track.id && styles.trackItemActive,
-                    ]}
-                    onPress={() => handleTrackPress(track)}
-                  >
-                    <View style={styles.trackInfo}>
-                      <Text
-                        style={[
-                          styles.trackTitle,
-                          currentTrack?.id === track.id && styles.trackTitleActive,
-                        ]}
-                        numberOfLines={1}
-                      >
-                        {track.title}
-                      </Text>
-                      <Text style={styles.trackArtist} numberOfLines={1}>
-                        {track.artist}
-                      </Text>
-                    </View>
-                    {loadingTrackId === track.id && (
-                      <ActivityIndicator size="small" color="#d4a574" />
-                    )}
-                    {currentTrack?.id === track.id && !loadingTrackId && (
-                      <View style={styles.playingIndicator} />
-                    )}
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-          )}
+        {query.length > 0 && results.isSuccess && tracks.length === 0 ? (
+          <EmptyState icon={<Search size={32} color={theme.colors.inkMuted} strokeWidth={1.6} />} title="No results" message={`Nothing matched “${query}”.`} />
+        ) : null}
 
-          {/* No Results State */}
-          {debouncedQuery.length > 0 && !isLoading && topTracks.length === 0 && (
-            <View style={styles.emptyState}>
-              <Search size={48} color="#b7a691" strokeWidth={1.5} />
-              <Text style={styles.emptyStateTitle}>No results found</Text>
-              <Text style={styles.emptyStateText}>
-                Try searching for a different song, artist, or keyword
-              </Text>
-            </View>
-          )}
+        {query.length > 0 && tracks.length > 0 ? (
+          <View style={styles.list}>
+            {tracks.map((track) => (
+              <TrackRow
+                key={track.id}
+                track={track}
+                onPress={handlePlay}
+                onLongPress={setSheetTrack}
+                isCurrent={currentTrackId === track.id}
+                isPlaying={isPlaying}
+                isLoading={loadingTrackId === track.id}
+                isDownloaded={downloads[track.id]?.status === 'done'}
+              />
+            ))}
+          </View>
+        ) : null}
 
-          {/* Empty Search State */}
-          {!debouncedQuery && searchHistory.length === 0 && (
-            <View style={styles.emptyState}>
-              <Search size={48} color="#b7a691" strokeWidth={1.5} />
-              <Text style={styles.emptyStateTitle}>Start searching</Text>
-              <Text style={styles.emptyStateText}>
-                Find your favorite songs and artists to get started
-              </Text>
-            </View>
-          )}
+        {query.length === 0 && searchHistory.length === 0 ? (
+          <EmptyState icon={<Search size={32} color={theme.colors.inkMuted} strokeWidth={1.6} />} title="Find something to play" message="Search for songs, artists or albums." />
+        ) : null}
+      </ScrollView>
 
-          <View style={styles.bottomPadding} />
-        </ScrollView>
-      </SafeAreaView>
-
-      {/* Mini Player */}
-      <MiniPlayer />
-
-      {/* Bottom Nav Bar */}
-      <BottomNavBar />
-    </View>
+      <TrackActionsSheet track={sheetTrack} onClose={() => setSheetTrack(null)} />
+    </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
+const makeStyles = (theme: Theme) => ({
+  container: { flex: 1, backgroundColor: theme.colors.bg },
+  header: { flexDirection: 'row' as const, alignItems: 'center' as const, paddingHorizontal: spacing.m, paddingVertical: spacing.s, gap: spacing.xs },
+  field: {
     flex: 1,
-    backgroundColor: '#f4eee3',
-  },
-  safeArea: {
-    flex: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: theme.spacing.m,
-    paddingVertical: theme.spacing.m,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(180, 164, 143, 0.3)',
-  },
-  backButton: {
-    padding: theme.spacing.s,
-    marginRight: theme.spacing.s,
-  },
-  searchContainer: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fcf9f1',
-    borderRadius: 12,
-    paddingHorizontal: theme.spacing.m,
+    height: 46,
+    borderRadius: radius.m,
+    backgroundColor: theme.colors.surface,
     borderWidth: 1,
-    borderColor: 'rgba(220, 208, 189, 0.5)',
+    borderColor: theme.colors.line,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: spacing.s,
+    paddingHorizontal: spacing.l,
   },
-  searchInput: {
-    flex: 1,
-    marginLeft: theme.spacing.s,
-    marginRight: theme.spacing.s,
-    paddingVertical: theme.spacing.m,
-    color: '#3a3530',
-    fontSize: 16,
-    fontWeight: '500',
-  },
-  clearButton: {
-    padding: theme.spacing.xs,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: theme.spacing.m,
-    paddingTop: theme.spacing.l,
-  },
-  bottomPadding: {
-    height: 16,
-  },
-
-  // History Section
-  historySection: {
-    marginBottom: theme.spacing.xl,
-  },
-  historyHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: theme.spacing.m,
-  },
-  historyTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.s,
-  },
-  historyTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#b4a48f',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  clearHistoryButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.xs,
-    paddingHorizontal: theme.spacing.s,
-    paddingVertical: theme.spacing.xs,
-    borderRadius: 8,
-    backgroundColor: 'rgba(180, 164, 143, 0.15)',
-  },
-  clearHistoryText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#b4a48f',
-  },
-  historyList: {
-    gap: theme.spacing.s,
-  },
-  historyItemWrapper: {
-    marginBottom: theme.spacing.s,
-  },
-  historyItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: theme.spacing.m,
-    paddingVertical: theme.spacing.m,
-    backgroundColor: '#fcf9f1',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(220, 208, 189, 0.5)',
-  },
-  historyItemContent: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.m,
-  },
-  historyItemText: {
-    fontSize: 15,
-    color: '#3a3530',
-    fontWeight: '500',
-  },
-
-  // Results Section
-  resultsSection: {
-    marginBottom: theme.spacing.xl,
-  },
-  resultsTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#b4a48f',
-    marginBottom: theme.spacing.m,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  resultsList: {
-    gap: theme.spacing.s,
-  },
-  trackItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: theme.spacing.m,
-    paddingVertical: theme.spacing.m,
-    backgroundColor: '#fcf9f1',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(220, 208, 189, 0.5)',
-  },
-  trackItemActive: {
-    borderColor: '#d4a574',
-    backgroundColor: 'rgba(212, 165, 116, 0.1)',
-  },
-  trackInfo: {
-    flex: 1,
-    marginRight: theme.spacing.m,
-  },
-  trackTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#3a3530',
-    marginBottom: theme.spacing.xs,
-  },
-  trackTitleActive: {
-    color: '#8f7d68',
-  },
-  trackArtist: {
-    fontSize: 13,
-    color: '#b7a691',
-    fontWeight: '400',
-  },
-  playingIndicator: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#d4a574',
-  },
-
-  // Loading State
-  loadingContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: theme.spacing.xxl,
-  },
-  loadingText: {
-    marginTop: theme.spacing.m,
-    fontSize: 14,
-    color: '#b7a691',
-    fontWeight: '500',
-  },
-
-  // Empty State
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: theme.spacing.xxl,
-  },
-  emptyStateTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#3a3530',
-    marginTop: theme.spacing.l,
-  },
-  emptyStateText: {
-    fontSize: 14,
-    color: '#b7a691',
-    textAlign: 'center',
-    marginTop: theme.spacing.m,
-    paddingHorizontal: theme.spacing.l,
-    fontWeight: '400',
-  },
+  input: { flex: 1, ...type.body, color: theme.colors.ink, paddingVertical: 0 },
+  content: { paddingTop: spacing.s },
+  sectionHeader: { flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const, paddingHorizontal: spacing.xl, paddingVertical: spacing.s },
+  sectionTitle: { ...type.eyebrow, color: theme.colors.inkMuted },
+  sectionAction: { ...type.footnote, color: theme.colors.accentStrong, fontWeight: '600' as const },
+  historyRow: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: spacing.m, minHeight: 48, paddingHorizontal: spacing.xl },
+  historyText: { flex: 1, ...type.body, color: theme.colors.ink },
+  historyRemove: { width: 36, height: 36, alignItems: 'center' as const, justifyContent: 'center' as const, marginRight: -spacing.s },
+  list: { paddingHorizontal: spacing.s },
+  loading: { alignItems: 'center' as const, paddingVertical: spacing.xxxl, gap: spacing.m },
+  loadingText: { ...type.footnote, color: theme.colors.inkMuted },
+  errorStrip: { marginHorizontal: spacing.xl, marginVertical: spacing.s, padding: spacing.m, borderRadius: radius.m, backgroundColor: theme.colors.dangerSoft },
+  errorText: { ...type.footnote, color: theme.colors.danger },
 });
 
 export default SearchScreen;

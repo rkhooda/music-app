@@ -1,260 +1,109 @@
 import React, { useEffect, useRef } from 'react';
-import { Animated, Dimensions, Easing, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Animated, Dimensions, Easing, Pressable, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { RootStackParamList } from '../navigation/types';
 import { useUserStore } from '../store/user.store';
-import { playerPalette } from '../constants/mockPlayer';
+import { Theme, radius, shadow, spacing, type, useStyles, useTheme } from '../theme';
 import { Feeling } from '../types/music';
 
 const { width } = Dimensions.get('window');
 
-const genres = [
-  { id: 'chill' as const, label: 'Chill', color: '#dfece8' },
-  { id: 'rap' as const, label: 'Rap', color: '#eadfd6' },
-  { id: 'hardcore' as const, label: 'Hardcore', color: '#eadfce' },
-  { id: 'love' as const, label: 'Love', color: '#f1e2dd' },
+const moods: Array<{ id: Feeling; label: string; light: string; dark: string }> = [
+  { id: 'chill', label: 'Chill', light: '#dfece8', dark: '#22302c' },
+  { id: 'rap', label: 'Rap', light: '#eadfd6', dark: '#33271f' },
+  { id: 'hardcore', label: 'Hardcore', light: '#eadfce', dark: '#35291a' },
+  { id: 'love', label: 'Love', light: '#f1e2dd', dark: '#3a2626' },
 ];
 
 const GreetingScreen = () => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const setFeeling = useUserStore(s => s.setFeeling);
-  const resetFeeling = useUserStore(s => s.reset);
-  const selectedFeeling = useUserStore(s => s.feeling);
+  const theme = useTheme();
+  const styles = useStyles(makeStyles);
+  const setFeeling = useUserStore((s) => s.setFeeling);
+  const resetFeeling = useUserStore((s) => s.reset);
+  const selected = useUserStore((s) => s.feeling);
 
-  const titleOpacity = useRef(new Animated.Value(0)).current;
-  const titleTranslateY = useRef(new Animated.Value(18)).current;
-  const subtitleOpacity = useRef(new Animated.Value(0)).current;
-  const subtitleTranslateY = useRef(new Animated.Value(18)).current;
-  const profileOpacity = useRef(new Animated.Value(0)).current;
-  const profileTranslateY = useRef(new Animated.Value(40)).current;
-  const footerOpacity = useRef(new Animated.Value(0)).current;
+  const title = useRef(new Animated.Value(0)).current;
+  const grid = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     resetFeeling();
-  }, [resetFeeling]);
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(titleOpacity, {
-        toValue: 1,
-        duration: 800,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-      Animated.timing(titleTranslateY, {
-        toValue: 0,
-        duration: 800,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-      Animated.sequence([
-        Animated.delay(600),
-        Animated.parallel([
-          Animated.timing(subtitleOpacity, {
-            toValue: 1,
-            duration: 800,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-          Animated.timing(subtitleTranslateY, {
-            toValue: 0,
-            duration: 800,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-        ]),
-      ]),
-      Animated.sequence([
-        Animated.delay(2000),
-        Animated.parallel([
-          Animated.timing(profileOpacity, {
-            toValue: 1,
-            duration: 1000,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-          Animated.timing(profileTranslateY, {
-            toValue: 0,
-            duration: 1000,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }),
-        ]),
-      ]),
+    Animated.stagger(140, [
+      Animated.timing(title, { toValue: 1, duration: 520, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(grid, { toValue: 1, duration: 520, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
     ]).start();
-  }, [profileOpacity, profileTranslateY, subtitleOpacity, subtitleTranslateY, titleOpacity, titleTranslateY]);
+  }, [resetFeeling, title, grid]);
 
-  useEffect(() => {
-    Animated.timing(footerOpacity, {
-      toValue: 1,
-      duration: 350,
-      easing: Easing.out(Easing.quad),
-      useNativeDriver: true,
-    }).start();
-  }, [footerOpacity]);
-
-  const handleGenreSelect = (id: Feeling) => {
-    if (selectedFeeling === id) {
-      resetFeeling();
-      return;
-    }
-
-    setFeeling(id);
-  };
-
-  const handleContinue = () => {
-    if (!selectedFeeling) {
-      setFeeling('freestyle');
-    }
-
+  const continueToHome = () => {
+    if (!selected) setFeeling('freestyle');
     navigation.navigate('Home');
   };
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.header}>
-        <Animated.Text
-          style={[
-            styles.greeting,
-            {
-              opacity: titleOpacity,
-              transform: [{ translateY: titleTranslateY }],
-            },
-          ]}
-        >
-          Hola Rkxee
-        </Animated.Text>
-        <Animated.Text
-          style={[
-            styles.subGreeting,
-            {
-              opacity: subtitleOpacity,
-              transform: [{ translateY: subtitleTranslateY }],
-            },
-          ]}
-        >
-          How're you feeling?
-        </Animated.Text>
-      </View>
+      <Animated.View style={[styles.header, { opacity: title, transform: [{ translateY: title.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }] }]}>
+        <Text style={styles.greeting}>Hola Rkxee</Text>
+        <Text style={styles.subGreeting}>How are you feeling?</Text>
+      </Animated.View>
 
-      <Animated.View
-        style={[
-          styles.gridContainer,
-          {
-            opacity: profileOpacity,
-            transform: [{ translateY: profileTranslateY }],
-          },
-        ]}
-      >
-        <View style={styles.grid}>
-          {genres.map((genre) => (
-            <TouchableOpacity
-              key={genre.id}
-              onPress={() => handleGenreSelect(genre.id)}
-              activeOpacity={0.8}
-              style={[
+      <Animated.View style={[styles.grid, { opacity: grid, transform: [{ translateY: grid.interpolate({ inputRange: [0, 1], outputRange: [28, 0] }) }] }]}>
+        {moods.map((mood) => {
+          const active = selected === mood.id;
+          return (
+            <Pressable
+              key={mood.id}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              onPress={() => (active ? resetFeeling() : setFeeling(mood.id))}
+              style={({ pressed }) => [
                 styles.card,
-                {
-                  backgroundColor: genre.color,
-                  borderWidth: selectedFeeling === genre.id ? 4 : 0,
-                  borderColor: playerPalette.text,
-                },
+                { backgroundColor: theme.dark ? mood.dark : mood.light, borderColor: active ? theme.colors.accentStrong : theme.colors.glassBorder, borderWidth: active ? 2 : 1 },
+                pressed && { transform: [{ scale: 0.97 }] },
               ]}
             >
-              <Text style={styles.cardLabel}>{genre.label}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+              <Text style={styles.cardLabel}>{mood.label}</Text>
+            </Pressable>
+          );
+        })}
       </Animated.View>
 
-      <Animated.View
-        style={[
-          styles.footer,
-          {
-            opacity: footerOpacity,
-          },
-        ]}
-      >
-        <TouchableOpacity onPress={handleContinue}>
-          <Text style={styles.continueText}>
-            {selectedFeeling ? 'Click to continue to home page' : "I'll freestyle"}
-          </Text>
-        </TouchableOpacity>
-      </Animated.View>
+      <View style={styles.footer}>
+        <Pressable accessibilityRole="button" onPress={continueToHome} style={({ pressed }) => [styles.continueButton, pressed && { opacity: 0.85 }]}>
+          <Text style={styles.continueText}>{selected ? 'Continue' : "I'll freestyle"}</Text>
+        </Pressable>
+      </View>
     </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: playerPalette.screen,
-    justifyContent: 'center',
-    paddingHorizontal: 30,
-    paddingTop: 24,
-  },
-  header: {
-    marginBottom: 50,
-  },
-  greeting: {
-    fontSize: 48,
-    fontWeight: '800',
-    color: playerPalette.text,
-    letterSpacing: -1,
-  },
-  subGreeting: {
-    fontSize: 32,
-    fontWeight: '500',
-    color: playerPalette.textMuted,
-    marginTop: 8,
-  },
-  gridContainer: {
-    marginTop: 20,
-  },
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
+const makeStyles = (theme: Theme) => ({
+  container: { flex: 1, backgroundColor: theme.colors.bg, paddingHorizontal: spacing.xxxl, justifyContent: 'center' as const },
+  header: { marginBottom: spacing.xxxl + spacing.l },
+  greeting: { fontSize: 44, fontWeight: '800' as const, letterSpacing: -1, color: theme.colors.ink },
+  subGreeting: { fontSize: 26, fontWeight: '500' as const, color: theme.colors.inkMuted, marginTop: spacing.s },
+  grid: { flexDirection: 'row' as const, flexWrap: 'wrap' as const, justifyContent: 'space-between' as const, rowGap: spacing.l },
   card: {
-    width: (width - 80) / 2,
+    width: (width - spacing.xxxl * 2 - spacing.l) / 2,
     aspectRatio: 1,
-    borderRadius: 24,
-    marginBottom: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: playerPalette.shadow,
-    shadowOffset: { width: 0, height: 14 },
-    shadowOpacity: 0.24,
-    shadowRadius: 18,
-    elevation: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(219, 206, 186, 0.92)',
+    borderRadius: radius.xl,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    ...shadow(theme, 'card'),
   },
-  cardLabel: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: playerPalette.text,
-    textTransform: 'uppercase',
-    letterSpacing: 0.9,
+  cardLabel: { ...type.headline, color: theme.colors.ink, textTransform: 'uppercase' as const, letterSpacing: 1 },
+  footer: { position: 'absolute' as const, bottom: spacing.xxxl + spacing.l, left: 0, right: 0, alignItems: 'center' as const },
+  continueButton: {
+    minHeight: 50,
+    paddingHorizontal: spacing.xxxl,
+    borderRadius: radius.pill,
+    backgroundColor: theme.colors.accent,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    ...shadow(theme, 'card'),
   },
-  footer: {
-    position: 'absolute',
-    bottom: 60,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    paddingHorizontal: 30,
-  },
-  continueText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: playerPalette.text,
-    letterSpacing: 0.5,
-    opacity: 0.9,
-  },
+  continueText: { ...type.headline, color: theme.colors.onAccent },
 });
 
 export default GreetingScreen;

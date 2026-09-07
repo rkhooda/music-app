@@ -1,382 +1,277 @@
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
+import { AudioPlayer, AudioStatus, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { create } from 'zustand';
-import { API_BASE_URL, getStreamUrl } from '../api/music';
+import { ApiError, describeError, prefetchStreams, resolveStream, streamUri } from '../api/client';
+import { perf } from '../lib/perf';
 import { MusicTrack } from '../types/music';
+import { useDownloadsStore } from './downloads.store';
+
+export type PlaybackSource = 'local' | 'stream';
 
 interface PlayerState {
   currentTrack: MusicTrack | null;
   queue: MusicTrack[];
   currentIndex: number;
-  isPlaying: boolean;
+  source: PlaybackSource | null;
+  /** True from tap until the first audio frame. */
   isLoading: boolean;
-  isBuffering: boolean;
   loadingTrackId: string | null;
+  isPlaying: boolean;
+  /** Stalled mid-track waiting for data. */
+  isBuffering: boolean;
   progress: number;
   duration: number;
-  sound: Audio.Sound | null;
-  prefetchedSound: Audio.Sound | null;
-  prefetchedTrackId: string | null;
-  nextSongUrl: string | null;
+  shuffle: boolean;
   error: string | null;
-  isSeeking: boolean;
   playTrack: (track: MusicTrack, queue?: MusicTrack[]) => Promise<void>;
-  togglePlayback: () => Promise<void>;
-  seekTo: (value: number) => Promise<void>;
+  togglePlayback: () => void;
+  seekTo: (seconds: number) => Promise<void>;
   skipNext: () => Promise<void>;
   skipPrevious: () => Promise<void>;
-  prefetchNextSong: () => Promise<void>;
-  preloadNextSongs: () => Promise<void>;
+  toggleShuffle: () => void;
   clearError: () => void;
 }
 
-let audioConfigured = false;
-let latestPlaybackRequest = 0;
+const LOAD_TIMEOUT_MS = 30_000;
+const NEXT_PREFETCH_COUNT = 2;
+
+// One player for the life of the app; sources are swapped with replace().
+let player: AudioPlayer | null = null;
+let audioModeReady = false;
+let requestToken = 0;
+let loadedAt = 0;
+let loadTimer: ReturnType<typeof setTimeout> | null = null;
+let resolveAbort: AbortController | null = null;
+let seeking = false;
 
 const ensureAudioMode = async () => {
-  if (audioConfigured) {
-    return;
-  }
-
-  await Audio.setAudioModeAsync({
-    staysActiveInBackground: false,
-    playsInSilentModeIOS: true,
-    shouldDuckAndroid: true,
-    interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-    interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
-  });
-
-  audioConfigured = true;
-};
-
-const unloadCurrentSound = async (sound: Audio.Sound | null) => {
-  if (!sound) {
-    return;
-  }
-
+  if (audioModeReady) return;
+  audioModeReady = true;
   try {
-    sound.setOnPlaybackStatusUpdate(null);
-    await sound.unloadAsync();
-  } catch {
-    // Ignore unload errors for stale sound instances.
+    await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' });
+  } catch (error) {
+    console.warn('[player] audio mode', error);
   }
 };
 
-const unloadPrefetchedSound = async (sound: Audio.Sound | null) => {
-  if (!sound) {
-    return;
-  }
+const clearLoadTimer = () => {
+  if (loadTimer) clearTimeout(loadTimer);
+  loadTimer = null;
+};
 
+const setLockScreen = (audio: AudioPlayer, track: MusicTrack) => {
   try {
-    sound.setOnPlaybackStatusUpdate(null);
-    await sound.unloadAsync();
-  } catch {
-    // Ignore unload errors for stale prefetch instances.
-  }
-};
-
-const buildStreamUri = (trackId: string, quality: 'best' | 'low' = 'best') =>
-  `${API_BASE_URL}/stream/${trackId}${quality === 'low' ? '?quality=low' : ''}`;
-
-const resolveCurrentTrackIndex = (
-  queue: MusicTrack[],
-  currentIndex: number,
-  currentTrack: MusicTrack | null,
-) => {
-  if (currentIndex >= 0 && currentIndex < queue.length) {
-    return currentIndex;
-  }
-
-  if (currentTrack) {
-    const fallbackIndex = queue.findIndex((item) => item.id === currentTrack.id);
-    if (fallbackIndex >= 0) {
-      return fallbackIndex;
-    }
-  }
-
-  return queue.length > 0 ? 0 : -1;
-};
-
-const prefetchTrack = async (track: MusicTrack | null, set: any, get: any) => {
-  if (!track) {
-    return;
-  }
-
-  const state = get();
-  if (state.prefetchedTrackId === track.id) {
-    return;
-  }
-
-  await unloadPrefetchedSound(state.prefetchedSound);
-
-  try {
-    const streamUrl = buildStreamUri(track.id);
-    const { sound } = await Audio.Sound.createAsync(
-      { uri: streamUrl },
-      { shouldPlay: false, progressUpdateIntervalMillis: 400 },
+    audio.setActiveForLockScreen(
+      true,
+      { title: track.title, artist: track.artist, artworkUrl: track.thumbnail },
+      { showSeekBackward: false, showSeekForward: false },
     );
+  } catch {
+    // Not supported in this runtime (e.g. web); playback still works.
+  }
+};
+
+export const usePlayerStore = create<PlayerState>((set, get) => {
+  const handleStatus = (status: AudioStatus) => {
+    const state = get();
+    const track = state.currentTrack;
+    if (!track) return;
+
+    const started = state.isLoading && status.playing;
+    if (started) {
+      clearLoadTimer();
+      perf.audioStarted(track.id);
+    }
 
     set({
-      prefetchedSound: sound,
-      prefetchedTrackId: track.id,
-      nextSongUrl: streamUrl,
+      isPlaying: status.playing,
+      isBuffering: !status.playing && status.isBuffering && !state.isLoading,
+      isLoading: started ? false : state.isLoading,
+      loadingTrackId: started ? null : state.loadingTrackId,
+      duration: status.duration > 0 ? status.duration : state.duration,
+      ...(seeking ? {} : { progress: status.currentTime }),
     });
-  } catch {
-    // Prefetch failures should not interrupt the player.
-  }
-};
 
-const warmNextSongUrls = async (tracks: MusicTrack[]) => {
-  const nextTracks = tracks.filter((track) => track?.id);
-  if (nextTracks.length === 0) {
-    return;
-  }
+    // Guard against a stale finish event from the previous source right after replace().
+    if (status.didJustFinish && Date.now() - loadedAt > 1500) {
+      void handleTrackEnded();
+    }
+  };
 
-  await Promise.all(
-    nextTracks.map(async (track) => {
-      try {
-        await getStreamUrl(track.id);
-      } catch {
-        // Allow failures silently.
-      }
-    }),
-  );
-};
+  const getPlayer = (): AudioPlayer => {
+    if (player) return player;
+    player = createAudioPlayer(null, { updateInterval: 250 });
+    player.addListener('playbackStatusUpdate', handleStatus);
+    return player;
+  };
 
-export const usePlayerStore = create<PlayerState>((set, get) => ({
-  currentTrack: null,
-  queue: [],
-  currentIndex: -1,
-  isPlaying: false,
-  isLoading: false,
-  isBuffering: false,
-  loadingTrackId: null,
-  progress: 0,
-  duration: 0,
-  sound: null,
-  prefetchedSound: null,
-  prefetchedTrackId: null,
-  nextSongUrl: null,
-  error: null,
-  isSeeking: false,
-  clearError: () => set({ error: null }),
-  prefetchNextSong: async () => {
-    const state = get();
-    const nextTrack = state.queue[state.currentIndex + 1] || state.queue[0] || null;
-    if (!nextTrack) {
+  const handleTrackEnded = async () => {
+    const { queue, currentIndex, shuffle } = get();
+    const hasNext = shuffle ? queue.length > 1 : currentIndex < queue.length - 1;
+    if (hasNext) {
+      await get().skipNext();
       return;
     }
+    getPlayer().pause();
+    set({ isPlaying: false });
+  };
 
-    await prefetchTrack(nextTrack, set, get);
-    const upcomingTracks = state.queue.slice(state.currentIndex + 2, state.currentIndex + 4);
-    await warmNextSongUrls(upcomingTracks);
-  },
-  preloadNextSongs: async () => {
-    const state = get();
-    const upcomingTracks = state.queue.slice(state.currentIndex + 1, state.currentIndex + 4);
-    if (upcomingTracks.length === 0) {
-      return;
+  const armLoadTimeout = (token: number, trackId: string) => {
+    clearLoadTimer();
+    loadTimer = setTimeout(() => {
+      if (token !== requestToken || !get().isLoading) return;
+      perf.cancel(trackId);
+      getPlayer().pause();
+      set({ isLoading: false, loadingTrackId: null, isPlaying: false, error: "Playback didn't start. Check the backend and your connection." });
+    }, LOAD_TIMEOUT_MS);
+  };
+
+  const pickNextIndex = (direction: 1 | -1) => {
+    const { queue, currentIndex, shuffle } = get();
+    if (queue.length === 0) return -1;
+    if (shuffle && queue.length > 1) {
+      let candidate = currentIndex;
+      while (candidate === currentIndex) candidate = Math.floor(Math.random() * queue.length);
+      return candidate;
     }
+    const next = currentIndex + direction;
+    return next >= 0 && next < queue.length ? next : -1;
+  };
 
-    await prefetchTrack(upcomingTracks[0], set, get);
-    await warmNextSongUrls(upcomingTracks.slice(1));
-  },
-  playTrack: async (track, queue) => {
-    const playbackRequest = ++latestPlaybackRequest;
-    const state = get();
-    const existingSound = state.sound;
-    const isSameTrack = state.currentTrack?.id === track.id && !!existingSound;
+  return {
+    currentTrack: null,
+    queue: [],
+    currentIndex: -1,
+    source: null,
+    isLoading: false,
+    loadingTrackId: null,
+    isPlaying: false,
+    isBuffering: false,
+    progress: 0,
+    duration: 0,
+    shuffle: false,
+    error: null,
 
-    set({ isLoading: true, isBuffering: false, loadingTrackId: track.id, error: null });
+    clearError: () => set({ error: null }),
+    toggleShuffle: () => set((state) => ({ shuffle: !state.shuffle })),
 
-    try {
-      await ensureAudioMode();
+    playTrack: async (track, queue) => {
+      const token = ++requestToken;
+      const state = get();
+      const nextQueue = queue && queue.length > 0 ? queue : state.queue.some((item) => item.id === track.id) ? state.queue : [track];
+      const nextIndex = Math.max(0, nextQueue.findIndex((item) => item.id === track.id));
+      const localUri = useDownloadsStore.getState().localUriFor(track.id);
+      const source: PlaybackSource = localUri ? 'local' : 'stream';
 
-      if (isSameTrack && existingSound) {
-        await existingSound.setPositionAsync(0);
-        await existingSound.playAsync();
-
-        const nextQueue = queue && queue.length > 0 ? queue : state.queue.length > 0 ? state.queue : [track];
-        const nextIndex = nextQueue.findIndex((item) => item.id === track.id);
-
-        set({
-          queue: nextQueue,
-          currentIndex: nextIndex >= 0 ? nextIndex : 0,
-          isPlaying: true,
-          progress: 0,
-          duration: state.duration || track.duration || 0,
-          isLoading: false,
-          isBuffering: false,
-          loadingTrackId: null,
-        });
-
-        void get().preloadNextSongs();
-        return;
-      }
-
-      const preloadedSound = state.prefetchedTrackId === track.id ? state.prefetchedSound : null;
-      const streamUrl = preloadedSound
-        ? buildStreamUri(track.id, 'best')
-        : buildStreamUri(track.id, 'low');
-
-      if (playbackRequest !== latestPlaybackRequest) {
-        return;
-      }
-
-      await unloadCurrentSound(existingSound);
-
-      let sound: Audio.Sound;
-      let status: any;
-
-      if (preloadedSound) {
-        sound = preloadedSound;
-        status = await sound.getStatusAsync();
-      } else {
-        const created = await Audio.Sound.createAsync(
-          { uri: streamUrl },
-          { shouldPlay: true, progressUpdateIntervalMillis: 400 },
-        );
-        sound = created.sound;
-        status = created.status;
-      }
-
-      if (playbackRequest !== latestPlaybackRequest) {
-        await unloadCurrentSound(sound);
-        return;
-      }
-
-      sound.setOnPlaybackStatusUpdate((playbackStatus) => {
-        if (playbackRequest !== latestPlaybackRequest) {
-          return;
-        }
-
-        if (!playbackStatus.isLoaded) {
-          if (playbackStatus.error) {
-            set({
-              error: playbackStatus.error,
-              isLoading: false,
-              isBuffering: false,
-              isPlaying: false,
-              loadingTrackId: null,
-            });
-          }
-          return;
-        }
-
-        set({
-          isPlaying: playbackStatus.isPlaying,
-          progress: get().isSeeking ? get().progress : playbackStatus.positionMillis / 1000,
-          duration: (playbackStatus.durationMillis ?? 0) / 1000 || track.duration || 0,
-          isLoading: false,
-          isBuffering: playbackStatus.isBuffering,
-          loadingTrackId: null,
-        });
-
-        if (playbackStatus.didJustFinish) {
-          void get().skipNext();
-        }
-      });
-
-      if (!preloadedSound) {
-        void getStreamUrl(track.id, 'best').catch(() => undefined);
-      }
-
-      if (preloadedSound) {
-        await sound.playAsync();
-      }
-
-      const nextQueue = queue && queue.length > 0 ? queue : get().queue.length > 0 ? get().queue : [track];
-      const nextIndex = nextQueue.findIndex((item) => item.id === track.id);
+      perf.tap(track.id, source);
+      resolveAbort?.abort();
+      resolveAbort = null;
 
       set({
-        sound,
         currentTrack: track,
         queue: nextQueue,
-        currentIndex: nextIndex >= 0 ? nextIndex : 0,
-        isPlaying: status.isLoaded ? status.isPlaying : true,
-        progress: 0,
-        duration: track.duration || (status.isLoaded ? (status.durationMillis ?? 0) / 1000 : 0),
-        isLoading: false,
-        isBuffering: status.isLoaded ? status.isBuffering : false,
-        loadingTrackId: null,
-        prefetchedSound: null,
-        prefetchedTrackId: null,
-        nextSongUrl: null,
-      });
-
-      void get().preloadNextSongs();
-    } catch (error) {
-      if (playbackRequest !== latestPlaybackRequest) {
-        return;
-      }
-
-      set({
-        isLoading: false,
-        isBuffering: false,
+        currentIndex: nextIndex,
+        source,
+        isLoading: true,
+        loadingTrackId: track.id,
         isPlaying: false,
-        loadingTrackId: null,
-        error: error instanceof Error ? error.message : 'Unable to play track',
+        isBuffering: false,
+        progress: 0,
+        duration: track.duration || 0,
+        error: null,
       });
-    }
-  },
-  togglePlayback: async () => {
-    const { sound, isPlaying, isLoading } = get();
-    if (!sound || isLoading) {
-      return;
-    }
 
-    try {
-      if (isPlaying) {
-        set({ isPlaying: false });
-        await sound.pauseAsync();
+      await ensureAudioMode();
+      if (token !== requestToken) return;
+
+      const audio = getPlayer();
+      loadedAt = Date.now();
+      audio.replace({ uri: localUri ?? streamUri(track.id) });
+      audio.play();
+      armLoadTimeout(token, track.id);
+      setLockScreen(audio, track);
+
+      if (!localUri) {
+        // Resolve in parallel with the player's own request: the backend dedupes the
+        // extraction, and this is where a precise error message comes from.
+        const controller = new AbortController();
+        resolveAbort = controller;
+        resolveStream(track.id, controller.signal)
+          .then((resolved) => {
+            if (token !== requestToken) return;
+            perf.resolved(track.id);
+            if (resolved.duration && !get().duration) set({ duration: resolved.duration });
+          })
+          .catch((error: unknown) => {
+            if (token !== requestToken || (error instanceof ApiError && error.kind === 'aborted')) return;
+            clearLoadTimer();
+            perf.cancel(track.id);
+            audio.pause();
+            set({ isLoading: false, loadingTrackId: null, isPlaying: false, error: describeError(error) });
+          });
+      } else {
+        perf.resolved(track.id);
+      }
+
+      const upcoming = nextQueue
+        .slice(nextIndex + 1, nextIndex + 1 + NEXT_PREFETCH_COUNT)
+        .filter((item) => !useDownloadsStore.getState().localUriFor(item.id))
+        .map((item) => item.id);
+      if (upcoming.length > 0) void prefetchStreams(upcoming, 'next');
+    },
+
+    togglePlayback: () => {
+      const { isPlaying, isLoading, currentTrack, progress, duration } = get();
+      if (!currentTrack || !player) return;
+
+      if (isLoading) {
+        // A second tap while loading cancels the load.
+        requestToken += 1;
+        clearLoadTimer();
+        resolveAbort?.abort();
+        perf.cancel(currentTrack.id);
+        player.pause();
+        set({ isLoading: false, loadingTrackId: null, isPlaying: false });
         return;
       }
 
+      if (isPlaying) {
+        player.pause();
+        set({ isPlaying: false });
+        return;
+      }
+
+      if (duration > 0 && progress >= duration - 0.5) {
+        void player.seekTo(0);
+      }
+      player.play();
       set({ isPlaying: true });
-      await sound.playAsync();
-    } catch (error) {
-      set({
-        isPlaying,
-        error: error instanceof Error ? error.message : 'Unable to update playback',
-      });
-    }
-  },
-  seekTo: async (value) => {
-    const { sound } = get();
-    if (!sound) {
-      return;
-    }
+    },
 
-    set({ progress: value, isSeeking: true });
+    seekTo: async (seconds) => {
+      if (!player || !get().currentTrack) return;
+      seeking = true;
+      set({ progress: seconds });
+      try {
+        await player.seekTo(seconds);
+      } finally {
+        seeking = false;
+      }
+    },
 
-    try {
-      await sound.setPositionAsync(value * 1000);
-    } finally {
-      set({ isSeeking: false });
-    }
-  },
-  skipNext: async () => {
-    const { queue, currentIndex, playTrack, currentTrack, isLoading } = get();
-    if (queue.length === 0 || isLoading) {
-      return;
-    }
+    skipNext: async () => {
+      const index = pickNextIndex(1);
+      if (index < 0) return;
+      await get().playTrack(get().queue[index], get().queue);
+    },
 
-    const normalizedIndex = resolveCurrentTrackIndex(queue, currentIndex, currentTrack);
-    const nextIndex = normalizedIndex >= queue.length - 1 ? 0 : normalizedIndex + 1;
-    await playTrack(queue[nextIndex], queue);
-  },
-  skipPrevious: async () => {
-    const { queue, currentIndex, progress, seekTo, playTrack, currentTrack, isLoading } = get();
-    if (queue.length === 0 || isLoading) {
-      return;
-    }
-
-    if (progress > 4) {
-      await seekTo(0);
-      return;
-    }
-
-    const normalizedIndex = resolveCurrentTrackIndex(queue, currentIndex, currentTrack);
-    const nextIndex = normalizedIndex <= 0 ? queue.length - 1 : normalizedIndex - 1;
-    await playTrack(queue[nextIndex], queue);
-  },
-}));
+    skipPrevious: async () => {
+      const { progress, queue } = get();
+      const index = pickNextIndex(-1);
+      if (progress > 4 || index < 0) {
+        await get().seekTo(0);
+        return;
+      }
+      await get().playTrack(queue[index], queue);
+    },
+  };
+});

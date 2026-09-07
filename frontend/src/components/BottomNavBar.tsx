@@ -1,171 +1,86 @@
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  Animated,
-  StyleSheet,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Home, Search, Library, Settings } from 'lucide-react-native';
-import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import { Animated, Pressable, StyleSheet, View } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { House, Library, Search, Settings } from 'lucide-react-native';
 import { RootStackParamList } from '../navigation/types';
+import { Theme, radius, shadow, spacing, useStyles, useTheme } from '../theme';
 
-type NavRoute = keyof RootStackParamList;
+export const NAV_BAR_HEIGHT = 60;
 
-interface NavItem {
-  label: string;
-  icon: (color: string) => React.ReactNode;
-  route?: NavRoute;
-  onPress: () => void;
+type TabRoute = 'Home' | 'Search' | 'Library' | 'Settings';
+
+const TABS: Array<{ route: TabRoute; label: string; Icon: typeof House }> = [
+  { route: 'Home', label: 'Home', Icon: House },
+  { route: 'Search', label: 'Search', Icon: Search },
+  { route: 'Library', label: 'Library', Icon: Library },
+  { route: 'Settings', label: 'Settings', Icon: Settings },
+];
+
+/** Which tab a given route belongs to (detail screens light up their parent tab). */
+const tabFor = (route: string): TabRoute | null => {
+  if (route === 'PlaylistDetail' || route === 'Downloads' || route === 'Library') return 'Library';
+  if (route === 'Home' || route === 'Search' || route === 'Settings') return route;
+  return null;
+};
+
+interface BottomNavBarProps {
+  routeName: string;
 }
 
-export const BottomNavBar = () => {
+export const BottomNavBar = ({ routeName }: BottomNavBarProps) => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const route = useRoute<RouteProp<RootStackParamList, NavRoute>>();
-  const insets = useSafeAreaInsets();
+  const theme = useTheme();
+  const styles = useStyles(makeStyles);
+  const [width, setWidth] = useState(0);
   const indicatorX = useRef(new Animated.Value(0)).current;
-  const [navWidth, setNavWidth] = useState(0);
-
-  const activeRoute = route.name as NavRoute;
-
-  const navItems: NavItem[] = [
-    {
-      label: 'Home',
-      route: 'Home',
-      icon: (color: string) => <Home size={24} strokeWidth={2} color={color} />,
-      onPress: () => navigation.navigate('Home'),
-    },
-    {
-      label: 'Search',
-      route: 'Search',
-      icon: (color: string) => <Search size={24} strokeWidth={2} color={color} />,
-      onPress: () => navigation.navigate('Search'),
-    },
-    {
-      label: 'Library',
-      route: 'Library',
-      icon: (color: string) => <Library size={24} strokeWidth={2} color={color} />,
-      onPress: () => navigation.navigate('Library'),
-    },
-    {
-      label: 'Settings',
-      icon: (color: string) => <Settings size={24} strokeWidth={2} color={color} />,
-      onPress: () => {},
-    },
-  ];
+  const activeTab = tabFor(routeName);
 
   useEffect(() => {
-    if (!navWidth) {
-      return;
-    }
-
-    const items = navItems.length;
-    const itemWidth = navWidth / items;
-    const activeIndex = navItems.findIndex((item) => item.route === activeRoute);
-    const targetX = activeIndex >= 0 ? itemWidth * activeIndex + itemWidth / 2 - 3 : 0;
-
-    Animated.spring(indicatorX, {
-      toValue: targetX,
-      useNativeDriver: true,
-      speed: 20,
-      bounciness: 8,
-    }).start();
-  }, [activeRoute, indicatorX, navWidth, navItems]);
+    if (!width) return;
+    const index = TABS.findIndex((tab) => tab.route === activeTab);
+    if (index < 0) return;
+    const slot = width / TABS.length;
+    Animated.spring(indicatorX, { toValue: slot * index + slot / 2 - 3, useNativeDriver: true, damping: 16, stiffness: 220, mass: 0.7 }).start();
+  }, [activeTab, width, indicatorX]);
 
   return (
-    <View
-      style={[
-        styles.wrapper,
-        {
-          paddingBottom: Math.max(insets.bottom, 8),
-        },
-      ]}
-    >
-      <View style={styles.shadowLayer} />
-      <View style={styles.navContainer}>
-        <View
-          style={styles.navContent}
-          onLayout={(event) => setNavWidth(event.nativeEvent.layout.width)}
-        >
-          <Animated.View
-            style={[
-              styles.animatedIndicator,
-              { transform: [{ translateX: indicatorX }] },
-            ]}
-          />
-          {navItems.map((item, index) => {
-            const isActive = item.route === activeRoute;
-            return (
-              <TouchableOpacity
-                key={index}
-                activeOpacity={0.75}
-                style={styles.navItem}
-                onPress={item.onPress}
-              >
-                <View style={styles.iconContainer}>
-                  {item.icon(isActive ? '#8f826d' : '#b7a89a')}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+    <View style={styles.wrapper}>
+      <View style={styles.bar} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
+        <Animated.View style={[styles.indicator, { transform: [{ translateX: indicatorX }] }]} />
+        {TABS.map(({ route, label, Icon }) => {
+          const active = route === activeTab;
+          return (
+            <Pressable
+              key={route}
+              accessibilityRole="tab"
+              accessibilityLabel={label}
+              accessibilityState={{ selected: active }}
+              onPress={() => navigation.navigate(route)}
+              android_ripple={{ color: theme.colors.line, borderless: true, radius: 28 }}
+              style={({ pressed }) => [styles.tab, pressed && { opacity: 0.6 }]}
+            >
+              <Icon size={23} strokeWidth={active ? 2.3 : 1.9} color={active ? theme.colors.ink : theme.colors.inkMuted} />
+            </Pressable>
+          );
+        })}
       </View>
     </View>
   );
 };
 
-const styles = StyleSheet.create({
-  wrapper: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
+const makeStyles = (theme: Theme) => ({
+  wrapper: { paddingHorizontal: spacing.l },
+  bar: {
+    height: NAV_BAR_HEIGHT,
+    borderRadius: radius.pill,
+    backgroundColor: theme.colors.glass,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.glassBorder,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    ...shadow(theme, 'float'),
   },
-  shadowLayer: {
-    position: 'absolute',
-    left: 16,
-    right: 16,
-    top: -8,
-    bottom: 0,
-    borderRadius: 32,
-    backgroundColor: 'rgba(216, 204, 184, 0.16)',
-    shadowColor: '#d8ccb8',
-    shadowOffset: { width: 0, height: -12 },
-    shadowOpacity: 0.28,
-    shadowRadius: 20,
-    elevation: 12,
-  },
-  navContainer: {
-    marginHorizontal: 16,
-    borderRadius: 32,
-    backgroundColor: '#fcf9f1',
-    borderWidth: 1,
-    borderColor: 'rgba(220, 208, 189, 0.85)',
-    paddingHorizontal: 8,
-  },
-  navContent: {
-    position: 'relative',
-    flexDirection: 'row',
-    alignItems: 'center',
-    height: 64,
-  },
-  navItem: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 8,
-  },
-  animatedIndicator: {
-    position: 'absolute',
-    bottom: 14,
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#a18f7d',
-  },
-  iconContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  tab: { flex: 1, height: NAV_BAR_HEIGHT, alignItems: 'center' as const, justifyContent: 'center' as const },
+  indicator: { position: 'absolute' as const, bottom: 9, width: 6, height: 6, borderRadius: 3, backgroundColor: theme.colors.accentStrong },
 });

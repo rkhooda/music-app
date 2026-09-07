@@ -1,189 +1,113 @@
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Animated,
-  Image,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { ActivityIndicator, Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { Pause, Play } from 'lucide-react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { fallbackArtwork, playerPalette } from '../constants/mockPlayer';
+import { Pause, Play, SkipForward } from 'lucide-react-native';
 import { RootStackParamList } from '../navigation/types';
 import { usePlayerStore } from '../store/player.store';
+import { Theme, radius, shadow, spacing, type, useStyles, useTheme } from '../theme';
+import { Artwork } from './Artwork';
+import { IconButton } from './IconButton';
 
-const getArtworkSource = (thumbnail?: string) =>
-  thumbnail ? { uri: thumbnail } : fallbackArtwork;
+export const MINI_PLAYER_HEIGHT = 64;
 
+/** Floating glass bar; mounted once in AppChrome so it never re-animates between screens. */
 export const MiniPlayer = () => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const insets = useSafeAreaInsets();
+  const theme = useTheme();
+  const styles = useStyles(makeStyles);
   const currentTrack = usePlayerStore((s) => s.currentTrack);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const isLoading = usePlayerStore((s) => s.isLoading);
-  const sound = usePlayerStore((s) => s.sound);
+  const isBuffering = usePlayerStore((s) => s.isBuffering);
+  const error = usePlayerStore((s) => s.error);
+  const progress = usePlayerStore((s) => s.progress);
+  const duration = usePlayerStore((s) => s.duration);
   const togglePlayback = usePlayerStore((s) => s.togglePlayback);
-  const translateY = useRef(new Animated.Value(24)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
+  const skipNext = usePlayerStore((s) => s.skipNext);
+  const hasNext = usePlayerStore((s) => s.shuffle ? s.queue.length > 1 : s.currentIndex < s.queue.length - 1);
+
+  const reveal = useRef(new Animated.Value(0)).current;
+  const progressAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (!currentTrack) {
-      return;
-    }
+    Animated.spring(reveal, { toValue: currentTrack ? 1 : 0, useNativeDriver: true, damping: 18, stiffness: 190, mass: 0.9 }).start();
+  }, [currentTrack, reveal]);
 
-    translateY.setValue(24);
-    opacity.setValue(0);
+  useEffect(() => {
+    const ratio = duration > 0 ? Math.min(1, Math.max(0, progress / duration)) : 0;
+    Animated.timing(progressAnim, { toValue: ratio, duration: 260, useNativeDriver: false }).start();
+  }, [progress, duration, progressAnim]);
 
-    Animated.parallel([
-      Animated.spring(translateY, {
-        toValue: 0,
-        useNativeDriver: true,
-        damping: 18,
-        stiffness: 180,
-        mass: 0.95,
-      }),
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: 280,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [currentTrack, opacity, translateY]);
+  if (!currentTrack) return null;
 
-  if (!currentTrack) {
-    return null;
-  }
-
-  const isStartingPlayback = isLoading && !sound;
-  const artistLabel = currentTrack.artist || 'Unknown artist';
+  const busy = isLoading || isBuffering;
+  const subtitle = error ? error : busy ? (isLoading ? 'Loading…' : 'Buffering…') : currentTrack.artist;
 
   return (
     <Animated.View
       style={[
         styles.wrapper,
-        {
-          bottom: Math.max(insets.bottom, 10) + 12 + 76, // Extra space for navbar
-          opacity,
-          transform: [{ translateY }],
-        },
+        { opacity: reveal, transform: [{ translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }] },
       ]}
     >
-      <View style={styles.shadowLayer} />
-      <TouchableOpacity
-        activeOpacity={0.95}
-        style={styles.container}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Open player"
         onPress={() => navigation.navigate('Player')}
+        style={({ pressed }) => [styles.card, pressed && { opacity: 0.92 }]}
       >
-        <Image source={getArtworkSource(currentTrack.thumbnail)} style={styles.albumArt} />
-
-        <View style={styles.textContent}>
+        <Artwork uri={currentTrack.thumbnail} size={44} radius={10} />
+        <View style={styles.meta}>
           <Text style={styles.title} numberOfLines={1}>
             {currentTrack.title}
           </Text>
-          <Text style={styles.artist} numberOfLines={1}>
-            {artistLabel}
+          <Text style={[styles.subtitle, error ? styles.subtitleError : null]} numberOfLines={1}>
+            {subtitle}
           </Text>
         </View>
-
-        <View style={styles.controls}>
-          <TouchableOpacity
-            activeOpacity={0.85}
-            style={[styles.iconWrap, isStartingPlayback && styles.iconWrapDisabled]}
-            onPress={() => {
-              void togglePlayback();
-            }}
-            disabled={isStartingPlayback}
-          >
-            {isStartingPlayback ? (
-              <ActivityIndicator color={playerPalette.text} size="small" />
-            ) : isPlaying ? (
-              <Pause color={playerPalette.text} size={18} strokeWidth={2.2} />
-            ) : (
-              <Play
-                color={playerPalette.text}
-                size={18}
-                fill={playerPalette.text}
-                strokeWidth={2.2}
-              />
-            )}
-          </TouchableOpacity>
+        <IconButton label={isLoading ? 'Cancel' : isPlaying ? 'Pause' : 'Play'} onPress={togglePlayback} size={40}>
+          {isLoading ? (
+            <ActivityIndicator size="small" color={theme.colors.ink} />
+          ) : isPlaying ? (
+            <Pause size={20} color={theme.colors.ink} fill={theme.colors.ink} strokeWidth={2} />
+          ) : (
+            <Play size={20} color={theme.colors.ink} fill={theme.colors.ink} strokeWidth={2} />
+          )}
+        </IconButton>
+        <IconButton label="Next" onPress={() => void skipNext()} size={40} disabled={!hasNext}>
+          <SkipForward size={18} color={theme.colors.ink} fill={theme.colors.ink} strokeWidth={2} />
+        </IconButton>
+        <View style={styles.progressTrack}>
+          <Animated.View
+            style={[styles.progressFill, { width: progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]}
+          />
         </View>
-      </TouchableOpacity>
+      </Pressable>
     </Animated.View>
   );
 };
 
-const styles = StyleSheet.create({
-  wrapper: {
-    position: 'absolute',
-    left: 20,
-    right: 20,
+const makeStyles = (theme: Theme) => ({
+  wrapper: { marginHorizontal: spacing.l, marginBottom: spacing.s },
+  card: {
+    height: MINI_PLAYER_HEIGHT,
+    borderRadius: radius.l,
+    backgroundColor: theme.colors.glass,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.glassBorder,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    paddingLeft: spacing.m,
+    paddingRight: spacing.xs,
+    gap: spacing.m,
+    overflow: 'hidden' as const,
+    ...shadow(theme, 'float'),
   },
-  shadowLayer: {
-    position: 'absolute',
-    left: 12,
-    right: 12,
-    top: 10,
-    bottom: -8,
-    borderRadius: 24,
-    backgroundColor: 'rgba(216, 204, 184, 0.28)',
-    shadowColor: playerPalette.shadow,
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 0.42,
-    shadowRadius: 22,
-    elevation: 10,
-  },
-  container: {
-    minHeight: 68,
-    borderRadius: 20,
-    backgroundColor: playerPalette.surfaceStrong,
-    borderWidth: 1,
-    borderColor: 'rgba(220, 208, 189, 0.9)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  albumArt: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: 'rgba(216, 204, 184, 0.22)',
-  },
-  textContent: {
-    flex: 1,
-    marginLeft: 12,
-    paddingRight: 12,
-  },
-  title: {
-    color: playerPalette.text,
-    fontSize: 13,
-    fontWeight: '600',
-    letterSpacing: 0.1,
-  },
-  artist: {
-    color: playerPalette.textMuted,
-    fontSize: 11,
-    marginTop: 3,
-    fontWeight: '600',
-  },
-  controls: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginLeft: 'auto',
-  },
-  iconWrap: {
-    width: 34,
-    height: 34,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 17,
-  },
-  iconWrapDisabled: {
-    opacity: 0.7,
-  },
+  meta: { flex: 1, gap: 2 },
+  title: { ...type.callout, fontWeight: '600' as const, color: theme.colors.ink },
+  subtitle: { ...type.footnote, color: theme.colors.inkMuted },
+  subtitleError: { color: theme.colors.danger },
+  progressTrack: { position: 'absolute' as const, left: 0, right: 0, bottom: 0, height: 2, backgroundColor: theme.colors.line },
+  progressFill: { height: 2, backgroundColor: theme.colors.accentStrong },
 });

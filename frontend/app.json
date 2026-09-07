@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "frontend",
+    "name": "Music",
     "slug": "frontend",
     "version": "1.0.0",
     "platforms": [
@@ -8,21 +8,16 @@
     ],
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "android": {
       "package": "com.anonymous.frontend",
       "permissions": [
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
-        "READ_MEDIA_AUDIO",
-        "READ_MEDIA_VIDEO",
-        "READ_MEDIA_IMAGES",
-        "ACCESS_MEDIA_LOCATION"
+        "INTERNET"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#f3ede2"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
@@ -34,20 +29,16 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#f3ede2",
+      "dark": {
+        "backgroundColor": "#15120f"
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      [
-        "expo-media-library",
-        {
-          "photosPermission": "Allow $(PRODUCT_NAME) to access your music library.",
-          "savePhotosPermission": "Allow $(PRODUCT_NAME) to save music to your device.",
-          "isAccessMediaLocationEnabled": true
-        }
-      ]
+      "expo-audio"
     ],
     "extra": {
       "eas": {

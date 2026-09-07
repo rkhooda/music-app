@@ -1,616 +1,361 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Image,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { ChevronLeft, Edit3, Plus, Search, Trash2 } from 'lucide-react-native';
-import { API_BASE_URL, searchMusic } from '../api/music';
-import { cachePlaylist, cachePlaylistTrack } from '../api/playlist';
-import { MiniPlayer } from '../components/MiniPlayer';
-import { BottomNavBar } from '../components/BottomNavBar';
+import { ArrowDownToLine, Check, Ellipsis, ImagePlus, Play, Plus, Search, Shuffle, Trash2, X } from 'lucide-react-native';
+import { describeError, prefetchStreams, searchMusic } from '../api/client';
+import { Artwork } from '../components/Artwork';
+import { EmptyState } from '../components/EmptyState';
+import { IconButton } from '../components/IconButton';
+import { ScreenHeader } from '../components/ScreenHeader';
+import { TrackActionsSheet } from '../components/TrackActionsSheet';
+import { TrackRow } from '../components/TrackRow';
+import { useChromeInset } from '../components/AppChrome';
+import { pluralize } from '../lib/format';
 import { RootStackParamList } from '../navigation/types';
+import { useDownloadsStore } from '../store/downloads.store';
 import { usePlayerStore } from '../store/player.store';
-import { usePlaylistStore } from '../store/playlist.store';
+import { selectPlaylist, usePlaylistStore } from '../store/playlist.store';
+import { Theme, radius, shadow, spacing, type, useStyles, useTheme } from '../theme';
 import { MusicTrack } from '../types/music';
 
-type PlaylistDetailRouteProp = RouteProp<RootStackParamList, 'PlaylistDetail'>;
+type DetailRoute = RouteProp<RootStackParamList, 'PlaylistDetail'>;
 
 const PlaylistDetailScreen = () => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const route = useRoute<PlaylistDetailRouteProp>();
-  const { playlistId } = route.params;
-  const playlist = usePlaylistStore((state) => state.getPlaylistById(playlistId));
-  const addTrackToPlaylist = usePlaylistStore((state) => state.addTrackToPlaylist);
-  const setPlaylistCover = usePlaylistStore((state) => state.setPlaylistCover);
-  const deletePlaylist = usePlaylistStore((state) => state.deletePlaylist);
+  const { playlistId } = useRoute<DetailRoute>().params;
+  const theme = useTheme();
+  const styles = useStyles(makeStyles);
+  const bottomInset = useChromeInset();
+
+  const playlist = usePlaylistStore(selectPlaylist(playlistId));
+  const addTrackToPlaylist = usePlaylistStore((s) => s.addTrackToPlaylist);
+  const removeTrackFromPlaylist = usePlaylistStore((s) => s.removeTrackFromPlaylist);
+  const renamePlaylist = usePlaylistStore((s) => s.renamePlaylist);
+  const setPlaylistCover = usePlaylistStore((s) => s.setPlaylistCover);
+  const deletePlaylist = usePlaylistStore((s) => s.deletePlaylist);
   const playTrack = usePlayerStore((s) => s.playTrack);
-  const currentTrack = usePlayerStore((s) => s.currentTrack);
+  const toggleShuffle = usePlayerStore((s) => s.toggleShuffle);
+  const shuffle = usePlayerStore((s) => s.shuffle);
+  const currentTrackId = usePlayerStore((s) => s.currentTrack?.id);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
   const loadingTrackId = usePlayerStore((s) => s.loadingTrackId);
-  const clearPlayerError = usePlayerStore((s) => s.clearError);
+  const downloads = useDownloadsStore((s) => s.items);
+  const enqueueMany = useDownloadsStore((s) => s.enqueueMany);
 
-  const [searchQuery, setSearchQuery] = useState('');
-  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
-  const [isCaching, setIsCaching] = useState(false);
-  const [cacheMessage, setCacheMessage] = useState('');
+  const [text, setText] = useState('');
+  const [query, setQuery] = useState('');
+  const [sheetTrack, setSheetTrack] = useState<MusicTrack | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
 
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      setDebouncedQuery(searchQuery.trim());
-    }, 350);
+    const timer = setTimeout(() => setQuery(text.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [text]);
 
-    return () => clearTimeout(timeout);
-  }, [searchQuery]);
-
+  // Warm the first few tracks so tapping "Play" feels instant.
   useEffect(() => {
-    if (!playlist || playlist.tracks.length === 0) {
-      setCacheMessage('');
-      setIsCaching(false);
-      return;
-    }
+    const ids = playlist?.tracks.slice(0, 3).map((track) => track.id) ?? [];
+    if (ids.length) void prefetchStreams(ids, 'warm');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playlistId]);
 
-    let active = true;
-    setIsCaching(true);
-    setCacheMessage('Caching playlist tracks for faster playback...');
-
-    cachePlaylist(playlistId, playlist.tracks.map((track) => track.id))
-      .then(() => {
-        if (!active) {
-          return;
-        }
-        setCacheMessage('Playlist ready for instant playback');
-      })
-      .catch(() => {
-        if (!active) {
-          return;
-        }
-        setCacheMessage('Playlist caching is unavailable right now');
-      })
-      .finally(() => {
-        if (active) {
-          setIsCaching(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [playlistId, playlist?.tracks]);
-
-  const searchResults = useQuery({
-    queryKey: ['playlist-search', debouncedQuery],
-    queryFn: ({ signal }) => searchMusic(debouncedQuery, signal),
-    enabled: showSearch && debouncedQuery.length > 0,
-    retry: 0,
-    staleTime: 1000 * 60 * 5,
-    gcTime: 1000 * 60 * 10,
+  const results = useQuery({
+    queryKey: ['music-search', query.toLowerCase()],
+    queryFn: ({ signal }) => searchMusic(query, signal),
+    enabled: showSearch && query.length > 0,
   });
-
-  const topTracks = useMemo(() => searchResults.data || [], [searchResults.data]);
-
-  const handleAddSong = (track: MusicTrack) => {
-    addTrackToPlaylist(playlistId, track);
-    setSearchQuery('');
-    setDebouncedQuery('');
-
-    void cachePlaylistTrack(playlistId, track.id).catch(() => {
-      // Best-effort caching; do not interrupt the user.
-    });
-  };
-
-  const handleTrackPress = async (track: MusicTrack) => {
-    clearPlayerError();
-    await playTrack(track, playlist?.tracks || [track]);
-  };
-
-  const askForGalleryPermission = async () => {
-    const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permissionResult.granted) {
-      Alert.alert(
-        'Permission required',
-        'Allow access to your photo library to choose a playlist cover.',
-      );
-      return false;
-    }
-    return true;
-  };
-
-  const handlePickCover = async () => {
-    const granted = await askForGalleryPermission();
-    if (!granted) {
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.8,
-    });
-
-    if (!result.canceled && result.assets?.length) {
-      setPlaylistCover(playlistId, result.assets[0].uri);
-    }
-  };
-
-  const handleDeletePlaylist = () => {
-    Alert.alert(
-      'Delete playlist',
-      'This will remove the playlist and its saved cover. Are you sure?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            deletePlaylist(playlistId);
-            navigation.navigate('Library');
-          },
-        },
-      ],
-    );
-  };
 
   if (!playlist) {
     return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-        <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
-        <View style={styles.centered}> 
-          <Text style={styles.notFoundTitle}>Playlist not found</Text>
-          <TouchableOpacity style={styles.ctaButton} onPress={() => navigation.goBack()} activeOpacity={0.8}>
-            <Text style={styles.ctaButtonText}>Back to library</Text>
-          </TouchableOpacity>
-        </View>
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <ScreenHeader title="Playlist" back />
+        <EmptyState title="Playlist not found" actionLabel="Back to library" onAction={() => navigation.navigate('Library')} />
       </SafeAreaView>
     );
   }
 
-  const playlistCount = playlist.tracks.length;
+  const tracks = playlist.tracks;
+  const downloadedCount = tracks.filter((track) => downloads[track.id]?.status === 'done').length;
+  const inProgress = tracks.filter((track) => ['queued', 'downloading'].includes(downloads[track.id]?.status ?? '')).length;
+  const failedCount = tracks.filter((track) => downloads[track.id]?.status === 'failed').length;
+  const allDownloaded = tracks.length > 0 && downloadedCount === tracks.length;
+
+  const playAll = (random = false) => {
+    if (tracks.length === 0) return;
+    if (random !== shuffle) toggleShuffle();
+    const first = random ? tracks[Math.floor(Math.random() * tracks.length)] : tracks[0];
+    void playTrack(first, tracks);
+  };
+
+  const downloadAll = () => {
+    const pending = tracks.filter((track) => downloads[track.id]?.status !== 'done');
+    pending.filter((track) => downloads[track.id]?.status === 'failed').forEach((track) => useDownloadsStore.getState().retry(track.id));
+    enqueueMany(pending);
+  };
+
+  const pickCover = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Photos access needed', 'Allow photo access to pick a playlist cover.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.8 });
+    if (!result.canceled && result.assets?.[0]?.uri) setPlaylistCover(playlistId, result.assets[0].uri);
+  };
+
+  const showMore = () => {
+    Alert.alert(playlist.title, undefined, [
+      {
+        text: 'Rename',
+        onPress: () => {
+          setRenameValue(playlist.title);
+          setRenaming(true);
+        },
+      },
+      { text: 'Change cover', onPress: () => void pickCover() },
+      {
+        text: 'Delete playlist',
+        style: 'destructive',
+        onPress: () =>
+          Alert.alert('Delete playlist?', 'Downloaded songs are kept.', [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Delete', style: 'destructive', onPress: () => { deletePlaylist(playlistId); navigation.navigate('Library'); } },
+          ]),
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <ScreenHeader
+        title={playlist.title}
+        subtitle={`${pluralize(tracks.length, 'song')}${downloadedCount > 0 ? ` · ${downloadedCount} offline` : ''}`}
+        back
+        right={
+          <IconButton label="More" onPress={showMore} variant="surface" size={40}>
+            <Ellipsis size={18} color={theme.colors.ink} strokeWidth={2.2} />
+          </IconButton>
+        }
+      />
 
-      <View style={styles.header}>
-        <TouchableOpacity
-          activeOpacity={0.8}
-          style={styles.iconButton}
-          onPress={() => navigation.goBack()}
-        >
-          <ChevronLeft size={18} color="#b4a48f" />
-        </TouchableOpacity>
-
-        <View style={styles.headerText}>
-          <Text style={styles.title}>{playlist.title}</Text>
-          <Text style={styles.subtitle}>{playlistCount} song{playlistCount !== 1 ? 's' : ''}</Text>
-          {cacheMessage ? <Text style={styles.cacheMessage}>{cacheMessage}</Text> : null}
+      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: bottomInset }]} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <View style={styles.coverRow}>
+          <Pressable onPress={() => void pickCover()} accessibilityLabel="Change cover" style={({ pressed }) => [pressed && { opacity: 0.85 }]}>
+            <Artwork uri={playlist.coverUri || tracks[0]?.thumbnail} size={132} radius={radius.l} style={styles.cover} />
+            <View style={styles.coverBadge}>
+              <ImagePlus size={14} color={theme.colors.ink} strokeWidth={2.2} />
+            </View>
+          </Pressable>
+          <View style={styles.actions}>
+            <Pressable onPress={() => playAll(false)} disabled={tracks.length === 0} style={({ pressed }) => [styles.primaryButton, pressed && { opacity: 0.8 }, tracks.length === 0 && { opacity: 0.4 }]}>
+              <Play size={16} color={theme.colors.onAccent} fill={theme.colors.onAccent} strokeWidth={2} />
+              <Text style={styles.primaryButtonText}>Play</Text>
+            </Pressable>
+            <View style={styles.actionRow}>
+              <IconButton label="Shuffle" onPress={() => playAll(true)} variant="surface" disabled={tracks.length === 0}>
+                <Shuffle size={18} color={theme.colors.ink} strokeWidth={2.2} />
+              </IconButton>
+              <IconButton label={allDownloaded ? 'Downloaded' : 'Download all'} onPress={downloadAll} variant="surface" disabled={tracks.length === 0 || allDownloaded}>
+                {inProgress > 0 ? (
+                  <ActivityIndicator size="small" color={theme.colors.accentStrong} />
+                ) : allDownloaded ? (
+                  <Check size={18} color={theme.colors.success} strokeWidth={2.4} />
+                ) : (
+                  <ArrowDownToLine size={18} color={theme.colors.ink} strokeWidth={2.2} />
+                )}
+              </IconButton>
+              <IconButton label={showSearch ? 'Close search' : 'Add songs'} onPress={() => setShowSearch((value) => !value)} variant={showSearch ? 'accent' : 'surface'}>
+                {showSearch ? <X size={18} color={theme.colors.onAccent} strokeWidth={2.4} /> : <Plus size={18} color={theme.colors.ink} strokeWidth={2.4} />}
+              </IconButton>
+            </View>
+            {inProgress > 0 || failedCount > 0 ? (
+              <Text style={styles.downloadMeta}>
+                {inProgress > 0 ? `Downloading ${downloadedCount + 1} of ${tracks.length}` : ''}
+                {inProgress > 0 && failedCount > 0 ? ' · ' : ''}
+                {failedCount > 0 ? `${failedCount} failed` : ''}
+              </Text>
+            ) : null}
+          </View>
         </View>
-      </View>
 
-      <View style={styles.coverSection}>
-        {playlist.coverUri ? (
-          <Image source={{ uri: playlist.coverUri }} style={styles.coverArt} />
-        ) : (
-          <View style={styles.coverPlaceholder}>
-            <Text style={styles.coverPlaceholderText}>Playlist cover</Text>
-          </View>
-        )}
-        <TouchableOpacity
-          activeOpacity={0.85}
-          style={styles.coverEditButton}
-          onPress={handlePickCover}
-        >
-          <Edit3 size={16} color="#fff" />
-        </TouchableOpacity>
-      </View>
-
-      <View style={[styles.controlRow, styles.controlRowWide]}>
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => setShowSearch((current) => !current)}
-          activeOpacity={0.85}
-        >
-          <Plus size={16} color="#4f3e2c" />
-          <Text style={styles.actionButtonText}>{showSearch ? 'Search songs' : 'Add songs'}</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.actionButton, styles.deleteButton]}
-          onPress={handleDeletePlaylist}
-          activeOpacity={0.85}
-        >
-          <Trash2 size={16} color="#8f3d40" />
-          <Text style={[styles.actionButtonText, styles.deleteButtonText]}>Delete</Text>
-        </TouchableOpacity>
-      </View>
-
-      {showSearch ? (
-        <View style={styles.searchSection}>
-          <View style={styles.searchInputWrap}>
-            <Search size={16} color="#b7a691" />
-            <TextInput
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholder="Search songs to add"
-              placeholderTextColor="#c9bcaa"
-              style={styles.searchInput}
-              selectionColor="#b69772"
-              returnKeyType="search"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </View>
-
-          {debouncedQuery.length === 0 ? (
-            <View style={styles.emptyState}> 
-              <Text style={styles.emptyTitle}>Search for any song.</Text>
-              <Text style={styles.emptyText}>Type a song, artist, or mood to add tracks to this playlist.</Text>
+        {showSearch ? (
+          <View style={styles.searchBlock}>
+            <View style={styles.field}>
+              <Search size={18} color={theme.colors.inkMuted} strokeWidth={2} />
+              <TextInput
+                value={text}
+                onChangeText={setText}
+                placeholder="Search songs to add"
+                placeholderTextColor={theme.colors.inkMuted}
+                style={styles.input}
+                selectionColor={theme.colors.accentStrong}
+                autoFocus
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="search"
+                onSubmitEditing={() => setQuery(text.trim())}
+              />
             </View>
-          ) : searchResults.isFetching ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#d4a574" />
-              <Text style={styles.loadingText}>Looking for songs...</Text>
-            </View>
-          ) : topTracks.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyTitle}>No songs found</Text>
-              <Text style={styles.emptyText}>Try another search term.</Text>
-            </View>
-          ) : (
-            <ScrollView
-              style={styles.resultsList}
-              contentContainerStyle={styles.scrollContent}
-              showsVerticalScrollIndicator={false}
-              bounces
-            >
-              {topTracks.map((track) => {
-                const alreadyAdded = playlist.tracks.some((item) => item.id === track.id);
-                return (
-                  <View key={track.id} style={styles.searchResultCard}>
-                    <View style={styles.resultInfo}>
-                      <Text style={styles.trackTitle} numberOfLines={1}>{track.title}</Text>
-                      <Text style={styles.trackArtist} numberOfLines={1}>{track.artist}</Text>
-                    </View>
-                    <TouchableOpacity
-                      style={[styles.addButton, alreadyAdded && styles.addedButton]}
-                      onPress={() => !alreadyAdded && handleAddSong(track)}
-                      activeOpacity={0.85}
+            {query.length > 0 && results.isPending ? (
+              <View style={styles.loading}>
+                <ActivityIndicator color={theme.colors.accentStrong} />
+              </View>
+            ) : null}
+            {query.length > 0 && results.isError ? <Text style={styles.errorText}>{describeError(results.error)}</Text> : null}
+            {(results.data ?? []).map((track) => {
+              const added = tracks.some((item) => item.id === track.id);
+              return (
+                <TrackRow
+                  key={track.id}
+                  track={track}
+                  onPress={(item) => void playTrack(item, results.data ?? [])}
+                  isCurrent={currentTrackId === track.id}
+                  isPlaying={isPlaying}
+                  isLoading={loadingTrackId === track.id}
+                  trailing={
+                    <Pressable
+                      onPress={() => !added && addTrackToPlaylist(playlistId, track)}
+                      disabled={added}
+                      accessibilityLabel={added ? 'Added' : 'Add to playlist'}
+                      style={({ pressed }) => [styles.addChip, added && styles.addChipDone, pressed && { opacity: 0.7 }]}
                     >
-                      <Text style={[styles.addButtonText, alreadyAdded && styles.addedButtonText]}>
-                        {alreadyAdded ? 'Added' : 'Add'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })}
-            </ScrollView>
-          )}
-        </View>
-      ) : null}
-
-      <ScrollView
-        style={styles.playlistScroll}
-        contentContainerStyle={styles.playlistContent}
-        showsVerticalScrollIndicator={false}
-        bounces
-      >
-        {playlist.tracks.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyTitle}>This playlist is empty</Text>
-            <Text style={styles.emptyText}>Tap Add songs to search and build your playlist.</Text>
+                      {added ? <Check size={14} color={theme.colors.success} strokeWidth={2.6} /> : <Plus size={14} color={theme.colors.onAccent} strokeWidth={2.6} />}
+                    </Pressable>
+                  }
+                />
+              );
+            })}
           </View>
-        ) : (
-          playlist.tracks.map((track, index) => {
-            const isCurrent = currentTrack?.id === track.id;
-            const isPreparingThisTrack = loadingTrackId === track.id;
+        ) : null}
 
-            return (
-              <TouchableOpacity
+        {tracks.length === 0 && !showSearch ? (
+          <EmptyState title="This playlist is empty" message="Add songs from search or long-press any song." actionLabel="Add songs" onAction={() => setShowSearch(true)} compact />
+        ) : (
+          <View style={styles.list}>
+            {tracks.map((track, index) => (
+              <TrackRow
                 key={track.id}
-                activeOpacity={0.9}
-                style={[styles.trackRow, isCurrent && styles.trackRowActive]}
-                onPress={() => handleTrackPress(track)}
-              >
-                <Text style={[styles.trackIndex, isCurrent && styles.trackIndexActive]}>{index + 1}</Text>
-                <View style={styles.trackMeta}>
-                  <Text style={[styles.trackName, isCurrent && styles.trackNameActive]} numberOfLines={1}>
-                    {track.title}
-                  </Text>
-                  <Text style={styles.trackArtist}>{track.artist}</Text>
-                </View>
-                {isPreparingThisTrack ? (
-                  <ActivityIndicator size="small" color="#d4a574" />
-                ) : isCurrent ? (
-                  <Text style={styles.playingIndicator}>Playing</Text>
-                ) : null}
-              </TouchableOpacity>
-            );
-          })
+                track={track}
+                index={index}
+                onPress={(item) => void playTrack(item, tracks)}
+                onLongPress={setSheetTrack}
+                isCurrent={currentTrackId === track.id}
+                isPlaying={isPlaying}
+                isLoading={loadingTrackId === track.id}
+                isDownloaded={downloads[track.id]?.status === 'done'}
+              />
+            ))}
+          </View>
         )}
       </ScrollView>
 
-      <MiniPlayer />
-      <BottomNavBar />
+      <TrackActionsSheet
+        track={sheetTrack}
+        onClose={() => setSheetTrack(null)}
+        excludePlaylistId={playlistId}
+        extraActions={[
+          {
+            label: 'Remove from playlist',
+            icon: <Trash2 size={18} color={theme.colors.danger} strokeWidth={2.2} />,
+            destructive: true,
+            onPress: () => sheetTrack && removeTrackFromPlaylist(playlistId, sheetTrack.id),
+          },
+        ]}
+      />
+
+      {renaming ? (
+        <View style={[StyleSheet.absoluteFill, styles.renameWrap]}>
+          <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: theme.colors.scrim }]} onPress={() => setRenaming(false)} />
+          <View style={styles.renameDialog}>
+            <Text style={styles.renameTitle}>Rename playlist</Text>
+            <TextInput value={renameValue} onChangeText={setRenameValue} style={styles.input} autoFocus selectionColor={theme.colors.accentStrong} />
+            <View style={styles.renameActions}>
+              <Pressable onPress={() => setRenaming(false)} style={styles.renameButton}>
+                <Text style={styles.renameCancel}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  renamePlaylist(playlistId, renameValue);
+                  setRenaming(false);
+                }}
+                style={[styles.renameButton, { backgroundColor: theme.colors.accent }]}
+              >
+                <Text style={styles.renameSave}>Save</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f4eee3',
+const makeStyles = (theme: Theme) => ({
+  container: { flex: 1, backgroundColor: theme.colors.bg },
+  content: { paddingTop: spacing.xs },
+  coverRow: { flexDirection: 'row' as const, paddingHorizontal: spacing.xl, gap: spacing.l, alignItems: 'flex-start' as const },
+  cover: { ...shadow(theme, 'card') },
+  coverBadge: {
+    position: 'absolute' as const,
+    right: 8,
+    bottom: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: theme.colors.glass,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.glassBorder,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 12,
+  actions: { flex: 1, gap: spacing.m, paddingTop: spacing.xs },
+  primaryButton: {
+    height: 44,
+    borderRadius: radius.pill,
+    backgroundColor: theme.colors.accent,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: spacing.s,
+    ...shadow(theme, 'soft'),
   },
-  iconButton: {
-    padding: 10,
-  },
-  headerText: {
-    marginLeft: 12,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#3f3527',
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#8b7f6e',
-    marginTop: 4,
-  },
-  cacheMessage: {
-    marginTop: 4,
-    fontSize: 12,
-    color: '#5f5a4d',
-  },
-  coverSection: {
-    marginHorizontal: 24,
-    borderRadius: 24,
-    overflow: 'hidden',
-    marginBottom: 18,
-    backgroundColor: '#e7dccf',
-  },
-  coverArt: {
-    width: '100%',
-    height: 180,
-  },
-  coverPlaceholder: {
-    width: '100%',
-    height: 180,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#f5f0e7',
-  },
-  coverPlaceholderText: {
-    color: '#8b7f6e',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  coverEditButton: {
-    position: 'absolute',
-    right: 16,
-    bottom: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 16,
-    backgroundColor: '#4f3e2c',
-    justifyContent: 'center',
-    alignItems: 'center',
+  primaryButtonText: { ...type.callout, fontWeight: '700' as const, color: theme.colors.onAccent },
+  actionRow: { flexDirection: 'row' as const, gap: spacing.s },
+  downloadMeta: { ...type.caption, fontWeight: '500' as const, color: theme.colors.inkMuted },
+  searchBlock: { paddingHorizontal: spacing.s, marginTop: spacing.xl, gap: spacing.xs },
+  field: {
+    marginHorizontal: spacing.m,
+    height: 46,
+    borderRadius: radius.m,
+    backgroundColor: theme.colors.surface,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.18)',
+    borderColor: theme.colors.line,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: spacing.s,
+    paddingHorizontal: spacing.l,
+    marginBottom: spacing.s,
   },
-  controlRow: {
-    paddingHorizontal: 24,
-    paddingBottom: 12,
-  },
-  actionButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    backgroundColor: '#faf5ec',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(187, 171, 145, 0.3)',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    shadowColor: '#d1bfaa',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 4,
-  },
-  actionButtonText: {
-    marginLeft: 8,
-    color: '#4f3e2c',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  controlRowWide: {
-    justifyContent: 'space-between',
-  },
-  deleteButton: {
-    backgroundColor: '#f7e6e5',
-    borderColor: '#e7b8b7',
-  },
-  deleteButtonText: {
-    color: '#8f3d40',
-  },
-  searchSection: {
-    paddingHorizontal: 24,
-    marginBottom: 10,
-  },
-  searchInputWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fcf9f1',
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(180, 164, 143, 0.3)',
-  },
-  searchInput: {
-    flex: 1,
-    marginLeft: 10,
-    color: '#3f3527',
-    fontSize: 14,
-  },
-  resultsList: {
-    maxHeight: 260,
-    marginTop: 14,
-  },
-  scrollContent: {
-    paddingBottom: 16,
-  },
-  searchResultCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#faf5ec',
-    borderRadius: 18,
-    padding: 14,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(187, 171, 145, 0.25)',
-  },
-  resultInfo: {
-    flex: 1,
-    marginRight: 12,
-  },
-  trackTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#3f3527',
-  },
-  trackArtist: {
-    marginTop: 4,
-    fontSize: 13,
-    color: '#8b7f6e',
-  },
-  addButton: {
-    backgroundColor: '#d4a574',
-    borderRadius: 16,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-  },
-  addedButton: {
-    backgroundColor: '#e7dfd1',
-  },
-  addButtonText: {
-    color: '#fff',
-    fontWeight: '700',
-  },
-  addedButtonText: {
-    color: '#8b7f6e',
-  },
-  playlistScroll: {
-    flex: 1,
-    paddingHorizontal: 24,
-  },
-  playlistContent: {
-    paddingBottom: 180,
-  },
-  trackRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(180, 164, 143, 0.16)',
-  },
-  trackRowActive: {
-    backgroundColor: 'rgba(212, 165, 116, 0.08)',
-  },
-  trackIndex: {
-    width: 30,
-    fontSize: 14,
-    color: '#b7a691',
-    fontWeight: '700',
-  },
-  trackIndexActive: {
-    color: '#4f3e2c',
-  },
-  trackMeta: {
-    flex: 1,
-  },
-  trackName: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#3f3527',
-  },
-  trackNameActive: {
-    color: '#4f3e2c',
-  },
-  playingIndicator: {
-    color: '#b69772',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 48,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#3f3527',
-    marginBottom: 8,
-  },
-  emptyText: {
-    fontSize: 14,
-    color: '#8b7f6e',
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  loadingContainer: {
-    alignItems: 'center',
-    paddingVertical: 24,
-  },
-  loadingText: {
-    marginTop: 10,
-    color: '#8b7f6e',
-  },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-  },
-  notFoundTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#3f3527',
-    marginBottom: 18,
-  },
-  ctaButton: {
-    backgroundColor: '#d4a574',
-    borderRadius: 16,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-  },
-  ctaButtonText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 14,
-  },
+  input: { flex: 1, ...type.body, color: theme.colors.ink, paddingVertical: 0 },
+  loading: { paddingVertical: spacing.xl, alignItems: 'center' as const },
+  errorText: { ...type.footnote, color: theme.colors.danger, paddingHorizontal: spacing.l, paddingVertical: spacing.s },
+  addChip: { width: 32, height: 32, borderRadius: 16, backgroundColor: theme.colors.accent, alignItems: 'center' as const, justifyContent: 'center' as const },
+  addChipDone: { backgroundColor: theme.colors.surfaceMuted },
+  list: { paddingHorizontal: spacing.s, marginTop: spacing.xl },
+  renameWrap: { justifyContent: 'center' as const, padding: spacing.xxl },
+  renameDialog: { backgroundColor: theme.colors.surfaceStrong, borderRadius: radius.xl, padding: spacing.xxl, gap: spacing.l, ...shadow(theme, 'float') },
+  renameTitle: { ...type.title, color: theme.colors.ink },
+  renameActions: { flexDirection: 'row' as const, justifyContent: 'flex-end' as const, gap: spacing.s },
+  renameButton: { minHeight: 44, paddingHorizontal: spacing.xl, borderRadius: radius.pill, alignItems: 'center' as const, justifyContent: 'center' as const },
+  renameCancel: { ...type.callout, fontWeight: '600' as const, color: theme.colors.inkSoft },
+  renameSave: { ...type.callout, fontWeight: '700' as const, color: theme.colors.onAccent },
 });
 
 export default PlaylistDetailScreen;
