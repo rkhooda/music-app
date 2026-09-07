@@ -1,245 +1,204 @@
 import { NextFunction, Request, Response } from 'express';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
-import { MusicSearchResult } from '../services/musicTypes';
-import { resolveStreamDescriptor, warmTopSearchResults } from '../services/streamService';
-import { cachePlaylistTracks, cachePlaylistTrack as cachePlaylistTrackService } from '../services/playlistCacheService';
-import { YouTubeDataApiError, searchYouTubeWithDataApi } from '../services/youtubeDataApiService';
-import { getAudioStreamDescriptor, listFormats as listYtDlpFormats, searchYouTube } from '../services/ytDlpService';
+import { config } from '../config';
+import { MusicSearchResult, StreamDescriptor, StreamPriority } from '../services/musicTypes';
+import { getStream, invalidateStream, prefetchStreams, streamCacheStats } from '../services/streamService';
+import { YouTubeDataApiError, isYouTubeDataApiConfigured, searchYouTubeWithDataApi } from '../services/youtubeDataApiService';
+import { isYtDlpWorkerRunning, pingYtDlp, searchYouTube } from '../services/ytDlpService';
 import logger from '../utils/logger';
+import { HttpError } from '../middleware/errorHandler';
 
-interface SearchCacheEntry {
-  data?: MusicSearchResult[];
+const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+const MAX_QUERY_LENGTH = 200;
+const MAX_PREFETCH_IDS = 10;
+const PROXIED_HEADERS = ['accept-ranges', 'cache-control', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified'];
+
+const requireVideoId = (value: unknown): string => {
+  if (typeof value !== 'string' || !VIDEO_ID.test(value)) {
+    throw new HttpError(400, 'A valid 11-character YouTube video id is required');
+  }
+  return value;
+};
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+interface SearchEntry {
+  results?: MusicSearchResult[];
   expiresAt?: number;
-  pendingPromise?: Promise<MusicSearchResult[]>;
+  pending?: Promise<MusicSearchResult[]>;
 }
 
-const searchQueryCache = new Map<string, SearchCacheEntry>();
-const SEARCH_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const searchCache = new Map<string, SearchEntry>();
 
-const isFreshSearchEntry = (entry?: SearchCacheEntry): entry is SearchCacheEntry & { data: MusicSearchResult[]; expiresAt: number } => {
-  return Boolean(entry?.data && entry.expiresAt && entry.expiresAt > Date.now());
-};
-
-const shouldFallbackToYtDlp = (error: unknown) => {
-  return error instanceof YouTubeDataApiError && error.shouldFallbackToYtDlp;
-};
-
-const loadSearchResults = async (query: string) => {
+const runSearch = async (query: string): Promise<MusicSearchResult[]> => {
   try {
     return await searchYouTubeWithDataApi(query);
   } catch (error) {
-    if (!shouldFallbackToYtDlp(error)) {
-      throw error;
-    }
-
-    const message = error instanceof Error ? error.message : 'unknown error';
-    logger.warn(`Falling back to yt-dlp search for "${query}": ${message}`);
+    if (!(error instanceof YouTubeDataApiError && error.shouldFallbackToYtDlp)) throw error;
+    logger.warn(`Data API unavailable (${error.message}); falling back to yt-dlp search for "${query}"`);
     return searchYouTube(query);
   }
 };
 
 export const searchMusic = async (req: Request, res: Response, next: NextFunction) => {
+  const startedAt = Date.now();
+  const raw = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (!raw) return next(new HttpError(400, 'Query parameter "q" is required'));
+  if (raw.length > MAX_QUERY_LENGTH) return next(new HttpError(400, `Query must be at most ${MAX_QUERY_LENGTH} characters`));
+
+  const key = raw.toLowerCase();
+  const entry = searchCache.get(key);
+
   try {
-    const { q } = req.query;
-    if (!q || typeof q !== 'string') {
-      return res.status(400).json({ error: 'Query parameter "q" is required' });
+    let results: MusicSearchResult[];
+    let source: string;
+
+    if (entry?.results && entry.expiresAt && entry.expiresAt > Date.now()) {
+      results = entry.results;
+      source = 'cache';
+    } else if (entry?.pending) {
+      results = await entry.pending;
+      source = 'joined';
+    } else {
+      const pending = runSearch(raw);
+      searchCache.set(key, { pending });
+      results = await pending;
+      searchCache.set(key, { results, expiresAt: Date.now() + config.search.ttlMs });
+      source = isYouTubeDataApiConfigured() ? 'data-api' : 'yt-dlp';
     }
-
-    const query = q.trim().toLowerCase();
-    const cachedSearch = searchQueryCache.get(query);
-    if (isFreshSearchEntry(cachedSearch)) {
-      logger.info(`Search cache hit: ${query}`);
-      res.json({ data: cachedSearch.data });
-      warmTopSearchResults(cachedSearch.data);
-      return;
-    }
-
-    const pendingPromise = cachedSearch?.pendingPromise || loadSearchResults(query);
-    searchQueryCache.set(query, { ...cachedSearch, pendingPromise });
-
-    const results = await pendingPromise;
-    searchQueryCache.set(query, {
-      data: results,
-      expiresAt: Date.now() + SEARCH_TTL,
-    });
 
     res.json({ data: results });
-    warmTopSearchResults(results);
+    logger.info(`search "${raw}" ${results.length} results source=${source} took=${Date.now() - startedAt}ms`);
 
+    // Warm the most likely taps only after the response is on the wire.
+    prefetchStreams(results.slice(0, config.search.warmTopResults).map((track) => track.id), 'warm');
   } catch (error) {
-    searchQueryCache.delete(String(req.query.q || '').trim().toLowerCase());
+    searchCache.delete(key);
     next(error);
   }
 };
+
+// ---------------------------------------------------------------------------
+// Stream URL + prefetch
+// ---------------------------------------------------------------------------
 
 export const getStreamUrl = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { videoId } = req.params;
-    if (!videoId || typeof videoId !== 'string') {
-      return res.status(400).json({ error: 'Video ID is required' });
-    }
-
-    const quality = req.query.quality === 'low' ? 'low' : 'best';
-    const streamDescriptor = quality === 'low'
-      ? await getAudioStreamDescriptor(videoId, 'low')
-      : await resolveStreamDescriptor(videoId, 'play');
-
-    res.json({ url: streamDescriptor.url });
+    const videoId = requireVideoId(req.params.videoId);
+    const descriptor = await getStream(videoId, 'play');
+    res.json({ url: descriptor.url, expiresAt: descriptor.expiresAt, duration: descriptor.duration ?? null });
   } catch (error) {
     next(error);
   }
 };
 
+export const prefetch = (req: Request, res: Response, next: NextFunction) => {
+  const { ids, priority } = (req.body ?? {}) as { ids?: unknown; priority?: unknown };
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_PREFETCH_IDS || !ids.every((id) => typeof id === 'string' && VIDEO_ID.test(id))) {
+    return next(new HttpError(400, `ids must be 1-${MAX_PREFETCH_IDS} valid video ids`));
+  }
+
+  const resolvedPriority: StreamPriority = priority === 'next' ? 'next' : 'warm';
+  prefetchStreams(ids as string[], resolvedPriority);
+  res.status(202).json({ queued: ids.length, priority: resolvedPriority });
+};
+
+// ---------------------------------------------------------------------------
+// Audio proxy
+// ---------------------------------------------------------------------------
+
+const isClientGone = (req: Request, res: Response) => req.destroyed || res.writableEnded || res.destroyed;
+
+const isAbort = (error: unknown) =>
+  error instanceof Error && (error.name === 'AbortError' || error.message.includes('Premature close') || error.message.includes('aborted'));
+
+const fetchUpstream = (descriptor: StreamDescriptor, req: Request, signal: AbortSignal) => {
+  const headers: Record<string, string> = { ...descriptor.httpHeaders };
+  if (typeof req.headers.range === 'string') headers.Range = req.headers.range;
+  if (typeof req.headers['if-range'] === 'string') headers['If-Range'] = req.headers['if-range'];
+  return fetch(descriptor.url, {
+    headers,
+    signal: AbortSignal.any([signal, AbortSignal.timeout(config.stream.upstreamHeaderTimeoutMs)]),
+  });
+};
+
+/**
+ * Proxies the googlevideo stream. YouTube binds stream URLs to the extracting
+ * IP, so the backend (which extracted it) must be the one fetching it. A stale
+ * URL (403/410) is re-extracted once, transparently.
+ */
 export const streamAudio = async (req: Request, res: Response, next: NextFunction) => {
+  const startedAt = Date.now();
+  const abort = new AbortController();
+  const onClose = () => abort.abort();
+  req.on('close', onClose);
+
   try {
-    const { videoId } = req.params;
-    if (!videoId || typeof videoId !== 'string') {
-      return res.status(400).json({ error: 'Video ID is required' });
+    const videoId = requireVideoId(req.params.videoId);
+    let descriptor = await getStream(videoId, 'play');
+    const resolvedAt = Date.now();
+    let upstream = await fetchUpstream(descriptor, req, abort.signal);
+    let recovered = false;
+
+    if (upstream.status === 403 || upstream.status === 410) {
+      logger.warn(`stream ${videoId}: upstream ${upstream.status}, re-extracting`);
+      await upstream.body?.cancel().catch(() => undefined);
+      invalidateStream(videoId);
+      descriptor = await getStream(videoId, 'play');
+      upstream = await fetchUpstream(descriptor, req, abort.signal);
+      recovered = true;
     }
 
-    const quality = req.query.quality === 'low' ? 'low' : 'best';
-    const streamDescriptor = quality === 'low'
-      ? await getAudioStreamDescriptor(videoId, 'low')
-      : await resolveStreamDescriptor(videoId, 'play');
-    const abortController = new AbortController();
-    const forwardedHeaders: Record<string, string> = {
-      ...streamDescriptor.httpHeaders,
-    };
-    const range = req.headers.range;
-    const ifRange = req.headers['if-range'];
-
-    if (typeof range === 'string') {
-      forwardedHeaders.Range = range;
+    if (!upstream.ok) {
+      await upstream.body?.cancel().catch(() => undefined);
+      throw new HttpError(502, `Upstream returned ${upstream.status}`);
     }
 
-    if (typeof ifRange === 'string') {
-      forwardedHeaders['If-Range'] = ifRange;
+    for (const name of PROXIED_HEADERS) {
+      const value = upstream.headers.get(name);
+      if (value) res.setHeader(name, value);
     }
+    if (!upstream.headers.get('content-type')) res.setHeader('content-type', 'audio/mp4');
+    res.status(upstream.status);
 
-    const closeHandler = () => {
-      abortController.abort();
-    };
+    logger.info(
+      `stream ${videoId} ${upstream.status} range=${req.headers.range ?? '-'} resolve=${resolvedAt - startedAt}ms ttfb=${Date.now() - startedAt}ms${recovered ? ' recovered=1' : ''}`,
+    );
 
-    req.on('close', closeHandler);
-
-    try {
-      const upstreamResponse = await fetch(streamDescriptor.url, {
-        headers: forwardedHeaders,
-        signal: abortController.signal,
-      });
-
-      const responseHeaders = [
-        'accept-ranges',
-        'cache-control',
-        'content-length',
-        'content-range',
-        'content-type',
-        'etag',
-        'last-modified',
-      ];
-
-      responseHeaders.forEach((headerName) => {
-        const headerValue = upstreamResponse.headers.get(headerName);
-        if (headerValue) {
-          res.setHeader(headerName, headerValue);
-        }
-      });
-
-      res.status(upstreamResponse.status);
-
-      if (!upstreamResponse.body) {
-        res.end();
-        return;
-      }
-
-      const bodyStream = Readable.fromWeb(upstreamResponse.body as any);
-      try {
-        await pipeline(bodyStream, res);
-      } catch (pipelineError) {
-        if (
-          pipelineError instanceof Error &&
-          (pipelineError.name === 'AbortError' || pipelineError.message.includes('Premature close'))
-        ) {
-          return;
-        }
-
-        if (res.headersSent || req.aborted || res.writableEnded) {
-          return;
-        }
-
-        throw pipelineError;
-      }
-    } finally {
-      req.off('close', closeHandler);
-    }
-
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.name === 'AbortError' || error.message.includes('Premature close'))
-    ) {
+    if (!upstream.body) {
+      res.end();
       return;
     }
 
-    if (res.headersSent || req.aborted || res.writableEnded) {
-      return;
-    }
-
+    await pipeline(Readable.fromWeb(upstream.body as never), res);
+  } catch (error) {
+    if (isAbort(error) || isClientGone(req, res)) return;
     next(error);
+  } finally {
+    req.off('close', onClose);
   }
 };
 
-export const cachePlaylist = async (req: Request, res: Response, next: NextFunction) => {
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+
+export const health = async (_req: Request, res: Response) => {
+  let ytDlp: { ok: boolean; version?: string; error?: string };
   try {
-    const { playlistId } = req.params;
-    const { trackIds } = req.body as { trackIds?: string[] };
-
-    if (!playlistId || typeof playlistId !== 'string') {
-      return res.status(400).json({ error: 'Playlist ID is required' });
-    }
-
-    if (!Array.isArray(trackIds) || trackIds.some((id) => typeof id !== 'string' || !id.trim())) {
-      return res.status(400).json({ error: 'trackIds must be a non-empty array of strings' });
-    }
-
-    await cachePlaylistTracks(playlistId, trackIds);
-    res.status(200).json({ message: 'Playlist tracks cached' });
+    const pong = await pingYtDlp();
+    ytDlp = { ok: true, version: pong.version };
   } catch (error) {
-    next(error);
+    ytDlp = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-};
 
-export const cachePlaylistTrackHandler = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { playlistId } = req.params;
-    const { trackId } = req.body as { trackId?: string };
-
-    if (!playlistId || typeof playlistId !== 'string') {
-      return res.status(400).json({ error: 'Playlist ID is required' });
-    }
-
-    if (!trackId || typeof trackId !== 'string') {
-      return res.status(400).json({ error: 'trackId is required' });
-    }
-
-    await cachePlaylistTrackService(playlistId, trackId);
-    res.status(200).json({ message: 'Track cached for playlist' });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const listFormats = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { videoId } = req.params;
-    if (!videoId || typeof videoId !== 'string') {
-      return res.status(400).json({ error: 'Video ID is required' });
-    }
-
-    const formats = await listYtDlpFormats(videoId);
-    res.type('text/plain').send(formats);
-  } catch (error) {
-    next(error);
-  }
+  res.status(ytDlp.ok ? 200 : 503).json({
+    status: ytDlp.ok ? 'ok' : 'degraded',
+    ytDlp: { ...ytDlp, running: isYtDlpWorkerRunning() },
+    search: isYouTubeDataApiConfigured() ? 'youtube-data-api' : 'yt-dlp-fallback',
+    cache: streamCacheStats(),
+  });
 };

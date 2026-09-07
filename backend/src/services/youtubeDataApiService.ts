@@ -1,3 +1,4 @@
+import { config } from '../config';
 import { MusicSearchResult } from './musicTypes';
 
 export class YouTubeDataApiError extends Error {
@@ -10,26 +11,9 @@ export class YouTubeDataApiError extends Error {
   }
 }
 
-interface SearchApiResponse {
-  items?: Array<{
-    id?: {
-      videoId?: string;
-    };
-    snippet?: {
-      title?: string;
-      channelTitle?: string;
-      thumbnails?: {
-        high?: { url?: string };
-        medium?: { url?: string };
-        default?: { url?: string };
-      };
-    };
-  }>;
+interface ApiError {
   error?: {
-    errors?: Array<{
-      reason?: string;
-      message?: string;
-    }>;
+    errors?: Array<{ reason?: string; message?: string }>;
     message?: string;
   };
 }
@@ -40,155 +24,97 @@ interface ThumbnailSet {
   default?: { url?: string };
 }
 
-interface VideosApiResponse {
+interface SearchApiResponse extends ApiError {
   items?: Array<{
-    id?: string;
-    contentDetails?: {
-      duration?: string;
-    };
-    statistics?: {
-      viewCount?: string;
-    };
+    id?: { videoId?: string };
+    snippet?: { title?: string; channelTitle?: string; thumbnails?: ThumbnailSet };
   }>;
 }
 
-const YOUTUBE_SEARCH_ENDPOINT = 'https://www.googleapis.com/youtube/v3/search';
-const YOUTUBE_VIDEOS_ENDPOINT = 'https://www.googleapis.com/youtube/v3/videos';
-const FALLBACK_ERROR_REASONS = new Set([
-  'accessNotConfigured',
-  'dailyLimitExceeded',
-  'keyExpired',
-  'keyInvalid',
-  'quotaExceeded',
-]);
+interface VideosApiResponse extends ApiError {
+  items?: Array<{
+    id?: string;
+    contentDetails?: { duration?: string };
+    statistics?: { viewCount?: string };
+  }>;
+}
 
-const parseDurationToSeconds = (duration?: string): number | null => {
-  if (!duration) {
-    return null;
-  }
+const SEARCH_ENDPOINT = 'https://www.googleapis.com/youtube/v3/search';
+const VIDEOS_ENDPOINT = 'https://www.googleapis.com/youtube/v3/videos';
+const FALLBACK_REASONS = new Set(['accessNotConfigured', 'dailyLimitExceeded', 'keyExpired', 'keyInvalid', 'quotaExceeded']);
+const REQUEST_TIMEOUT_MS = 8_000;
 
-  const parts = duration.match(/^P(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
-  if (!parts) {
-    return null;
-  }
+export const isYouTubeDataApiConfigured = () => Boolean(config.youtubeApiKey);
 
-  const hours = Number(parts[1] || 0);
-  const minutes = Number(parts[2] || 0);
-  const seconds = Number(parts[3] || 0);
-  return hours * 3600 + minutes * 60 + seconds;
+const parseDuration = (duration?: string): number | null => {
+  const parts = duration?.match(/^P(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+  if (!parts) return null;
+  return Number(parts[1] || 0) * 3600 + Number(parts[2] || 0) * 60 + Number(parts[3] || 0);
 };
 
-const getApiKey = (): string => {
-  const apiKey = process.env.YOUTUBE_DATA_API_KEY?.trim();
-  if (!apiKey) {
+const decodeHtml = (value: string) =>
+  value
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+
+const callApi = async <T extends ApiError>(endpoint: string, params: Record<string, string>, label: string): Promise<T> => {
+  const url = `${endpoint}?${new URLSearchParams({ ...params, key: config.youtubeApiKey }).toString()}`;
+  const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  const payload = (await response.json()) as T;
+
+  if (!response.ok) {
+    const reason = payload.error?.errors?.[0]?.reason || '';
+    const message = payload.error?.errors?.[0]?.message || payload.error?.message || `YouTube Data API ${label} failed`;
+    const fallback = [400, 401, 403].includes(response.status) || FALLBACK_REASONS.has(reason);
+    throw new YouTubeDataApiError(message, fallback);
+  }
+
+  return payload;
+};
+
+export const searchYouTubeWithDataApi = async (query: string, maxResults = 10): Promise<MusicSearchResult[]> => {
+  if (!isYouTubeDataApiConfigured()) {
     throw new YouTubeDataApiError('YOUTUBE_DATA_API_KEY is not configured', true);
   }
 
-  return apiKey;
-};
-
-const getThumbnailUrl = (thumbnails?: ThumbnailSet) => {
-  return thumbnails?.high?.url || thumbnails?.medium?.url || thumbnails?.default?.url;
-};
-
-export const searchYouTubeWithDataApi = async (query: string): Promise<MusicSearchResult[]> => {
-  const apiKey = getApiKey();
-  const searchParams = new URLSearchParams({
-    part: 'snippet',
-    type: 'video',
-    maxResults: '10',
-    q: query,
-    key: apiKey,
-  });
-
-  const searchResponse = await fetch(`${YOUTUBE_SEARCH_ENDPOINT}?${searchParams.toString()}`);
-  const searchPayload = await searchResponse.json() as SearchApiResponse;
-
-  if (!searchResponse.ok) {
-    const reason = searchPayload.error?.errors?.[0]?.reason;
-    const message = searchPayload.error?.errors?.[0]?.message || searchPayload.error?.message || 'YouTube Data API search failed';
-    throw new YouTubeDataApiError(message, searchResponse.status === 400 || searchResponse.status === 401 || searchResponse.status === 403 || FALLBACK_ERROR_REASONS.has(reason || ''));
-  }
-
-  const videoIds = searchPayload.items
-    ?.map((item) => item.id?.videoId)
-    .filter((id): id is string => Boolean(id)) || [];
-
-  if (videoIds.length === 0) {
-    return [];
-  }
-
-  const videosParams = new URLSearchParams({
-    part: 'contentDetails,statistics',
-    id: videoIds.join(','),
-    key: apiKey,
-  });
-
-  const videosResponse = await fetch(`${YOUTUBE_VIDEOS_ENDPOINT}?${videosParams.toString()}`);
-  const videosPayload = await videosResponse.json() as VideosApiResponse & SearchApiResponse;
-
-  if (!videosResponse.ok) {
-    const reason = videosPayload.error?.errors?.[0]?.reason;
-    const message = videosPayload.error?.errors?.[0]?.message || videosPayload.error?.message || 'YouTube Data API videos lookup failed';
-    throw new YouTubeDataApiError(message, videosResponse.status === 400 || videosResponse.status === 401 || videosResponse.status === 403 || FALLBACK_ERROR_REASONS.has(reason || ''));
-  }
-
-  const metadataById = new Map(
-    (videosPayload.items || [])
-      .filter((item): item is NonNullable<VideosApiResponse['items']>[number] & { id: string } => Boolean(item.id))
-      .map((item) => [
-        item.id,
-        {
-          duration: parseDurationToSeconds(item.contentDetails?.duration),
-          viewCount: Number(item.statistics?.viewCount || 0),
-        },
-      ]),
+  const search = await callApi<SearchApiResponse>(
+    SEARCH_ENDPOINT,
+    { part: 'snippet', type: 'video', videoCategoryId: '10', maxResults: String(maxResults), q: query },
+    'search',
   );
 
-  return (searchPayload.items || [])
-    .map((item): MusicSearchResult | null => {
-      const videoId = item.id?.videoId;
-      if (!videoId) {
-        return null;
-      }
+  const items = (search.items || []).filter((item) => item.id?.videoId);
+  if (items.length === 0) return [];
 
-      const metadata = metadataById.get(videoId);
+  const videos = await callApi<VideosApiResponse>(
+    VIDEOS_ENDPOINT,
+    { part: 'contentDetails,statistics', id: items.map((item) => item.id!.videoId!).join(',') },
+    'videos',
+  );
+
+  const metadata = new Map(
+    (videos.items || [])
+      .filter((item) => item.id)
+      .map((item) => [item.id!, { duration: parseDuration(item.contentDetails?.duration), viewCount: Number(item.statistics?.viewCount || 0) }]),
+  );
+
+  return items
+    .map((item): MusicSearchResult => {
+      const videoId = item.id!.videoId!;
+      const meta = metadata.get(videoId);
+      const thumbs = item.snippet?.thumbnails;
       return {
         id: videoId,
-        title: item.snippet?.title || 'Untitled',
-        artist: item.snippet?.channelTitle || 'Unknown artist',
-        duration: metadata?.duration ?? null,
-        thumbnail: getThumbnailUrl(item.snippet?.thumbnails),
+        title: decodeHtml(item.snippet?.title || 'Untitled'),
+        artist: decodeHtml(item.snippet?.channelTitle || 'Unknown artist'),
+        duration: meta?.duration ?? null,
+        thumbnail: thumbs?.high?.url || thumbs?.medium?.url || thumbs?.default?.url,
         url: `https://www.youtube.com/watch?v=${videoId}`,
-        viewCount: metadata?.viewCount || 0,
+        viewCount: meta?.viewCount || 0,
       };
     })
-    .filter((item): item is MusicSearchResult => Boolean(item))
     .sort((a, b) => (b.viewCount || 0) - (a.viewCount || 0));
-};
-export const getTrendingVideoIds = async (maxResults = 20): Promise<string[]> => {
-  const apiKey = getApiKey();
-  const searchParams = new URLSearchParams({
-    part: 'id',
-    chart: 'mostPopular',
-    regionCode: 'US',
-    maxResults: String(maxResults),
-    key: apiKey,
-  });
-
-  const response = await fetch(`${YOUTUBE_VIDEOS_ENDPOINT}?${searchParams.toString()}`);
-  const payload = await response.json() as VideosApiResponse & SearchApiResponse;
-
-  if (!response.ok) {
-    const reason = payload.error?.errors?.[0]?.reason;
-    const message = payload.error?.errors?.[0]?.message || payload.error?.message || 'YouTube Data API trending lookup failed';
-    throw new YouTubeDataApiError(
-      message,
-      response.status === 400 || response.status === 401 || response.status === 403 || FALLBACK_ERROR_REASONS.has(reason || ''),
-    );
-  }
-
-  return (payload.items || [])
-    .map((item) => item.id)
-    .filter((id): id is string => Boolean(id));
 };

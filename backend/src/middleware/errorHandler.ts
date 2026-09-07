@@ -1,20 +1,26 @@
-import { Request, Response, NextFunction } from 'express';
+import { NextFunction, Request, Response } from 'express';
 import logger from '../utils/logger';
 
-export const errorHandler = (err: any, req: Request, res: Response, next: NextFunction) => {
-  logger.error(`${err.name}: ${err.message}`, { stack: err.stack });
-
-  if (res.headersSent) {
-    return next(err);
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'HttpError';
   }
-  
-  const statusCode = err.statusCode || 500;
-  const message = err.message || 'Internal Server Error';
+}
 
-  res.status(statusCode).json({
-    error: {
-      message,
-      ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
-    },
-  });
+export const errorHandler = (err: unknown, req: Request, res: Response, next: NextFunction) => {
+  const status = typeof (err as { status?: unknown })?.status === 'number' ? (err as { status: number }).status : 500;
+  const message = err instanceof Error ? err.message : 'Internal Server Error';
+
+  if (status >= 500) {
+    logger.error(`${req.method} ${req.originalUrl} → ${status} ${message}`);
+  } else {
+    logger.warn(`${req.method} ${req.originalUrl} → ${status} ${message}`);
+  }
+
+  if (res.headersSent) return next(err);
+  res.status(status).json({ error: message });
 };

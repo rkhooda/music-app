@@ -1,156 +1,146 @@
+import { config } from '../config';
 import logger from '../utils/logger';
-import { MusicSearchResult, StreamDescriptor } from './musicTypes';
-import { getAudioStreamDescriptor } from './ytDlpService';
-import { getCachedStreamDescriptor, setCachedStreamDescriptor, isRedisEnabled } from './cacheService';
+import { StreamDescriptor, StreamPriority } from './musicTypes';
+import { extractStream } from './ytDlpService';
 
-type StreamPriority = 'play' | 'warm';
+/**
+ * videoId → stream descriptor cache with in-flight deduplication and a priority
+ * queue in front of the yt-dlp worker.
+ *
+ * - Fresh cache entry: returned synchronously.
+ * - Extraction already running/queued: callers attach to the same promise; a
+ *   higher-priority caller promotes the queued job.
+ * - Otherwise a job is queued. At most `config.ytDlp.concurrency` run at once and
+ *   user taps ('play') always dequeue before 'next' and 'warm'.
+ *
+ * ponytail: a running warm job is not preempted; a tap waits ≤ one extraction
+ * (~1.5 s) for a slot. Add worker-side cancellation if that ever shows up in logs.
+ */
 
-interface CacheEntry extends Partial<StreamDescriptor> {
-  pendingPromise?: Promise<StreamDescriptor>;
-}
+const RANK: Record<StreamPriority, number> = { play: 0, next: 1, warm: 2 };
 
-interface QueueJob {
+interface Job {
   videoId: string;
   priority: StreamPriority;
+  enqueuedAt: number;
+  promise: Promise<StreamDescriptor>;
   resolve: (descriptor: StreamDescriptor) => void;
-  reject: (error: unknown) => void;
+  reject: (error: Error) => void;
+  started: boolean;
 }
 
-const streamCache = new Map<string, CacheEntry>();
-const playQueue: QueueJob[] = [];
-const warmQueue: QueueJob[] = [];
-const MAX_CONCURRENT_EXTRACTIONS = 1;
-const STREAM_EXPIRY_SKEW_MS = 15_000;
-let activeExtractions = 0;
+interface Entry {
+  descriptor?: StreamDescriptor;
+  job?: Job;
+  lastUsedAt: number;
+}
 
-const isFreshDescriptor = (entry?: Partial<StreamDescriptor>): entry is StreamDescriptor => {
-  return Boolean(entry?.url && entry?.expiresAt && entry.expiresAt - STREAM_EXPIRY_SKEW_MS > Date.now());
-};
+const cache = new Map<string, Entry>();
+const queue: Job[] = [];
+let active = 0;
 
-const STREAM_DESCRIPTOR_TTL_SECONDS = 3600;
-const REFRESH_WINDOW_MS = 60 * 60 * 1000;
+const stats = { hits: 0, misses: 0, joined: 0, extractions: 0, failures: 0 };
 
-const storeResolvedDescriptor = (videoId: string, descriptor: StreamDescriptor) => {
-  streamCache.set(videoId, descriptor);
-  return descriptor;
-};
+const isFresh = (descriptor?: StreamDescriptor): descriptor is StreamDescriptor =>
+  Boolean(descriptor && descriptor.expiresAt - config.stream.expirySkewMs > Date.now());
 
-const retrieveDescriptorFromRedis = async (videoId: string): Promise<StreamDescriptor | null> => {
-  if (!isRedisEnabled) {
-    return null;
-  }
-
-  try {
-    const cached = await getCachedStreamDescriptor(videoId);
-    return cached && isFreshDescriptor(cached) ? cached : null;
-  } catch (error) {
-    logger.warn(`Redis read failed for ${videoId}: ${error instanceof Error ? error.message : 'unknown error'}`);
-    return null;
-  }
-};
-
-const cacheDescriptorToRedis = async (videoId: string, descriptor: StreamDescriptor) => {
-  if (!isRedisEnabled) {
-    return;
-  }
-
-  try {
-    await setCachedStreamDescriptor(videoId, descriptor, STREAM_DESCRIPTOR_TTL_SECONDS);
-  } catch (error) {
-    logger.warn(`Redis write failed for ${videoId}: ${error instanceof Error ? error.message : 'unknown error'}`);
-  }
-};
-
-const runNextQueuedExtraction = () => {
-  if (activeExtractions >= MAX_CONCURRENT_EXTRACTIONS) {
-    return;
-  }
-
-  const nextJob = playQueue.shift() || warmQueue.shift();
-  if (!nextJob) {
-    return;
-  }
-
-  activeExtractions += 1;
-
-  (async () => {
-    try {
-      const redisDescriptor = await retrieveDescriptorFromRedis(nextJob.videoId);
-      if (redisDescriptor) {
-        storeResolvedDescriptor(nextJob.videoId, redisDescriptor);
-        nextJob.resolve(redisDescriptor);
-        return;
-      }
-
-      const descriptor = await getAudioStreamDescriptor(nextJob.videoId);
-      await cacheDescriptorToRedis(nextJob.videoId, descriptor);
-      storeResolvedDescriptor(nextJob.videoId, descriptor);
-      nextJob.resolve(descriptor);
-    } catch (error) {
-      streamCache.delete(nextJob.videoId);
-      nextJob.reject(error);
-    } finally {
-      activeExtractions -= 1;
-      runNextQueuedExtraction();
+const evictIfNeeded = () => {
+  if (cache.size <= config.stream.maxCacheEntries) return;
+  let oldestKey: string | null = null;
+  let oldest = Infinity;
+  for (const [key, entry] of cache) {
+    if (!entry.job && entry.lastUsedAt < oldest) {
+      oldest = entry.lastUsedAt;
+      oldestKey = key;
     }
-  })();
-};
-
-export const resolveStreamDescriptor = async (
-  videoId: string,
-  priority: StreamPriority = 'play',
-): Promise<StreamDescriptor> => {
-  const cached = streamCache.get(videoId);
-  if (isFreshDescriptor(cached)) {
-    return cached;
   }
-
-  if (cached?.pendingPromise) {
-    return cached.pendingPromise;
-  }
-
-  const pendingPromise = new Promise<StreamDescriptor>((resolve, reject) => {
-    const job: QueueJob = { videoId, priority, resolve, reject };
-    if (priority === 'play') {
-      playQueue.push(job);
-    } else {
-      warmQueue.push(job);
-    }
-
-    runNextQueuedExtraction();
-  });
-
-  streamCache.set(videoId, { ...cached, pendingPromise });
-
-  try {
-    return await pendingPromise;
-  } catch (error) {
-    throw error;
-  }
+  if (oldestKey) cache.delete(oldestKey);
 };
 
-export const resolveMultipleStreamDescriptors = async (videoIds: string[]): Promise<StreamDescriptor[]> => {
-  const uniqueIds = Array.from(new Set(videoIds.filter(Boolean)));
-  return Promise.all(uniqueIds.map((videoId) => resolveStreamDescriptor(videoId, 'warm')));
-};
+const pump = () => {
+  while (active < config.ytDlp.concurrency && queue.length > 0) {
+    queue.sort((a, b) => RANK[a.priority] - RANK[b.priority] || a.enqueuedAt - b.enqueuedAt);
+    const job = queue.shift()!;
+    job.started = true;
+    active += 1;
+    stats.extractions += 1;
+    const startedAt = Date.now();
+    const waited = startedAt - job.enqueuedAt;
 
-export const refreshSoonExpiringStreamCache = async (): Promise<void> => {
-  const now = Date.now();
-  const retryJobs = Array.from(streamCache.entries())
-    .filter(([, entry]) => isFreshDescriptor(entry) && entry.expiresAt - now < REFRESH_WINDOW_MS)
-    .map(([videoId]) => resolveStreamDescriptor(videoId, 'warm'));
-
-  await Promise.allSettled(retryJobs);
-};
-
-export const warmTopSearchResults = (tracks: MusicSearchResult[], limit = 3) => {
-  tracks.slice(0, limit).forEach((track) => {
-    resolveStreamDescriptor(track.id, 'warm')
-      .then(() => {
-        logger.info(`Pre-warmed track: ${track.id}`);
+    extractStream(job.videoId)
+      .then((descriptor) => {
+        cache.set(job.videoId, { descriptor, lastUsedAt: Date.now() });
+        evictIfNeeded();
+        logger.info(
+          `extract ok ${job.videoId} priority=${job.priority} waited=${waited}ms took=${Date.now() - startedAt}ms ttl=${Math.round((descriptor.expiresAt - Date.now()) / 60000)}min`,
+        );
+        job.resolve(descriptor);
       })
-      .catch((error) => {
-        logger.warn(`Pre-warm failed for ${track.id}: ${error instanceof Error ? error.message : 'unknown error'}`);
+      .catch((error: Error) => {
+        stats.failures += 1;
+        cache.delete(job.videoId);
+        logger.warn(`extract failed ${job.videoId} priority=${job.priority} after ${Date.now() - startedAt}ms: ${error.message}`);
+        job.reject(error);
+      })
+      .finally(() => {
+        active -= 1;
+        pump();
       });
-  });
+  }
 };
+
+export const getStream = (videoId: string, priority: StreamPriority = 'play'): Promise<StreamDescriptor> => {
+  const entry = cache.get(videoId);
+
+  if (entry && isFresh(entry.descriptor)) {
+    stats.hits += 1;
+    entry.lastUsedAt = Date.now();
+    return Promise.resolve(entry.descriptor);
+  }
+
+  if (entry?.job) {
+    stats.joined += 1;
+    const job = entry.job;
+    if (!job.started && RANK[priority] < RANK[job.priority]) {
+      job.priority = priority;
+    }
+    return job.promise;
+  }
+
+  stats.misses += 1;
+  let resolve!: Job['resolve'];
+  let reject!: Job['reject'];
+  const promise = new Promise<StreamDescriptor>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  const job: Job = { videoId, priority, enqueuedAt: Date.now(), promise, resolve, reject, started: false };
+  cache.set(videoId, { job, lastUsedAt: Date.now() });
+  queue.push(job);
+  pump();
+  return promise;
+};
+
+/** Fire-and-forget warm-up; failures are logged, never thrown. */
+export const prefetchStreams = (videoIds: string[], priority: StreamPriority = 'warm') => {
+  for (const videoId of new Set(videoIds)) {
+    getStream(videoId, priority).catch(() => undefined);
+  }
+};
+
+export const invalidateStream = (videoId: string) => {
+  const entry = cache.get(videoId);
+  if (entry && !entry.job) cache.delete(videoId);
+};
+
+export const peekStream = (videoId: string): StreamDescriptor | undefined => {
+  const entry = cache.get(videoId);
+  return entry && isFresh(entry.descriptor) ? entry.descriptor : undefined;
+};
+
+export const streamCacheStats = () => ({
+  ...stats,
+  cached: Array.from(cache.values()).filter((entry) => isFresh(entry.descriptor)).length,
+  inFlight: active,
+  queued: queue.length,
+});

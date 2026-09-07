@@ -1,54 +1,41 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import musicRoutes from './routes/musicRoutes';
+import { config } from './config';
+import { health } from './controllers/musicController';
 import { errorHandler } from './middleware/errorHandler';
-import { refreshSoonExpiringStreamCache } from './services/streamService';
-import backgroundUrlFetcher from './services/backgroundUrlFetcher';
+import musicRoutes from './routes/musicRoutes';
+import { pingYtDlp, stopYtDlpWorker } from './services/ytDlpService';
 import logger from './utils/logger';
 
-dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
 
-// Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '16kb' }));
 
-// Routes
+app.get('/health', health);
 app.use('/api/music', musicRoutes);
-
-// Health check
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
-// Error handling
+app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 app.use(errorHandler);
 
-app.listen(Number(PORT), HOST, () => {
-  logger.info(`Server is running in ${process.env.NODE_ENV} mode on ${HOST}:${PORT}`);
+const server = app.listen(config.port, config.host, () => {
+  logger.info(`Listening on http://${config.host}:${config.port} (${config.isDev ? 'development' : 'production'})`);
+  logger.info(`Search: ${config.youtubeApiKey ? 'YouTube Data API' : 'yt-dlp fallback (set YOUTUBE_DATA_API_KEY for fast search)'}`);
 
-  if (process.env.ENABLE_BACKGROUND_SYNC === 'true') {
-    const intervalMs = Number(process.env.BACKGROUND_SYNC_INTERVAL_MS) || 5 * 60 * 1000;
-    logger.info(`Background sync enabled: refreshing stream cache every ${intervalMs}ms`);
-    setInterval(async () => {
-      try {
-        await refreshSoonExpiringStreamCache();
-      } catch (error) {
-        logger.warn(`Background sync failed: ${error instanceof Error ? error.message : 'unknown error'}`);
-      }
-    }, intervalMs);
-  }
-
-  if (process.env.ENABLE_BACKGROUND_URL_FETCHER === 'true') {
-    const intervalMs = Number(process.env.BACKGROUND_URL_FETCH_INTERVAL_MS) || 5 * 60 * 1000;
-    logger.info(`Background URL fetcher enabled: warming stream cache every ${intervalMs}ms`);
-    void backgroundUrlFetcher.start();
-    setInterval(() => {
-      void backgroundUrlFetcher.start();
-    }, intervalMs);
-  }
+  pingYtDlp()
+    .then((pong) => logger.info(`yt-dlp ${pong.version} ready`))
+    .catch((error: Error) => logger.error(error.message));
 });
+
+// Long audio proxies must not be cut off by the default 5s keep-alive.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+
+const shutdown = (signal: string) => {
+  logger.info(`${signal} received, shutting down`);
+  stopYtDlpWorker();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2_000).unref();
+};
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
