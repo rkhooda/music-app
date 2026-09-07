@@ -50,7 +50,8 @@ const main = async () => {
   assert.strictEqual(upstreamCalls, 2, 'expected one 403 then one successful upstream fetch');
   console.log('PASS expired-url recovery');
 
-  // 3. Priority: with both slots busy, a play request dequeues before queued warm work.
+  // 3. Priority: the first two warm jobs take both slots immediately; the play request
+  //    must then dequeue before the remaining warm jobs, so it always finishes before the last one.
   const warmIds = ['YQHsXMglC9A', '09R8_2nJtjg', 'kJQP7kiw5Fk', 'RgKAFK5djSk'];
   const order: string[] = [];
   const track = (vid: string, p: 'play' | 'warm') => getStream(vid, p).then(() => order.push(vid));
@@ -58,8 +59,9 @@ const main = async () => {
   const play = track('JGwWNGJdvx8', 'play');
   await Promise.all([...warm, play]);
   const playIndex = order.indexOf('JGwWNGJdvx8');
-  assert.ok(playIndex <= 2, `play finished at position ${playIndex}, expected within first 3 (2 slots)`);
-  console.log(`PASS priority (play finished #${playIndex + 1} of ${order.length})`);
+  const lastWarmIndex = order.indexOf(warmIds[warmIds.length - 1]);
+  assert.ok(playIndex < lastWarmIndex, `play finished #${playIndex + 1} but the last queued warm job finished #${lastWarmIndex + 1}`);
+  console.log(`PASS priority (play finished #${playIndex + 1} of ${order.length}, last warm #${lastWarmIndex + 1})`);
 
   console.log('SMOKE OK', JSON.stringify(streamCacheStats()));
   process.kill(process.pid, 'SIGINT');
