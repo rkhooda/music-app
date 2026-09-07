@@ -42,6 +42,8 @@ let loadedAt = 0;
 let loadTimer: ReturnType<typeof setTimeout> | null = null;
 let resolveAbort: AbortController | null = null;
 let seeking = false;
+// Android reports didJustFinish on every status event while ENDED; act on it once per load.
+let endedHandled = false;
 
 const ensureAudioMode = async () => {
   if (audioModeReady) return;
@@ -92,7 +94,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     });
 
     // Guard against a stale finish event from the previous source right after replace().
-    if (status.didJustFinish && Date.now() - loadedAt > 1500) {
+    if (status.didJustFinish && !endedHandled && Date.now() - loadedAt > 1500) {
+      endedHandled = true;
       void handleTrackEnded();
     }
   };
@@ -185,6 +188,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
       const audio = getPlayer();
       loadedAt = Date.now();
+      endedHandled = false;
       audio.replace({ uri: localUri ?? streamUri(track.id) });
       audio.play();
       armLoadTimeout(token, track.id);
@@ -241,6 +245,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
 
       if (duration > 0 && progress >= duration - 0.5) {
+        endedHandled = false;
         void player.seekTo(0);
       }
       player.play();
