@@ -1,68 +1,82 @@
-# My Music App 🎵
+# Music App
 
-A professional mobile music application built with **React Native (Expo)**, designed to stream your own music from your own backend source.
+Personal Android music player: YouTube search, instant streaming through a
+local backend, playlists, and offline downloads. Not intended for distribution.
 
----
+```
+frontend/   Expo (React Native) app — expo-audio player, Zustand stores, TanStack Query
+backend/    Express + resident yt-dlp worker — search, stream cache, audio proxy
+```
 
-## 📂 Project Structure
+## How playback works
 
-The project is divided into two main parts:
+```
+search ──▶ YouTube Data API (or yt-dlp fallback) ──▶ results in ~0.3 s
+                                                        │
+                                            backend warms top 3 (low priority)
+tap ──▶ player.replace(/api/music/stream/:id)  +  GET /api/music/url/:id  (parallel)
+                │                                        │
+                └──── backend: cache hit → proxy googlevideo immediately
+                                cache miss → one yt-dlp extraction (~1.5 s), deduped, play-priority
+```
 
-### 1. [Frontend (Mobile App)](./frontend)
-The core application, built with a modern stack for a fast and fluid music experience.
-- **Framework**: [Expo](https://expo.dev/) (React Native)
-- **State Management**: [Zustand](https://github.com/pmndrs/zustand) (Super simple and fast state management)
-- **Data Fetching**: [TanStack Query (v5)](https://tanstack.com/query/latest) (Robust caching and synchronization)
-- **Audio Playback**: [Expo AV](https://docs.expo.dev/versions/latest/sdk/av/) (Native audio/video capabilities)
-- **Navigation**: [React Navigation](https://reactnavigation.org/) (Seamless screen transitions)
+* One Python yt-dlp worker stays resident (`backend/worker/ytdlp_worker.py`);
+  Node talks to it over JSON lines. Cold-start cost per extraction is gone.
+* `videoId → stream URL` is cached in memory until YouTube's own expiry. Taps
+  outrank "next track" which outranks speculative warming; identical requests
+  share one extraction.
+* The backend proxies audio because YouTube binds stream URLs to the IP that
+  extracted them. A 403 from YouTube triggers one transparent re-extraction.
+* The app keeps a single `expo-audio` player alive and swaps its source.
 
-### 2. [Backend (Server)](./backend)
-The server-side logic that provides song metadata and streamable links.
-- **Current Status**: Implemented with Express, supports searching and stream URL extraction.
+## Run it
 
----
+Backend (macOS/Linux, needs Python 3 and Node 20+):
 
-## 🚀 Getting Started
+```bash
+cd backend
+npm install
+npm run setup            # creates .venv with yt-dlp
+cp .env.example .env     # add YOUTUBE_DATA_API_KEY for fast search
+npm run dev              # http://0.0.0.0:3000
+```
 
-### 📱 Frontend: Running the Mobile App
+Frontend (Android device or emulator on the same Wi‑Fi):
 
-To test the application before building a production version, we use the **Expo Development Server**.
+```bash
+cd frontend
+npm install
+npx expo run:android     # first time: builds the dev client
+npx expo start           # afterwards
+```
 
-1.  **Navigate to the frontend directory**:
-    ```bash
-    cd frontend
-    ```
-2.  **Install dependencies**:
-    ```bash
-    npm install
-    ```
-3.  **Start the Expo server**:
-    ```bash
-    npx expo start
-    ```
-4.  **How to test it**:
-    - **Physical Device (Recommended)**: Install the **Expo Go** app from the App Store or Play Store. Scan the QR code shown in your terminal.
-    - **iOS Simulator**: Press `i` in the terminal (Requires macOS and Xcode).
-    - **Android Emulator**: Press `a` in the terminal (Requires Android Studio and an AVD).
-    - **Web**: Press `w` to run in the browser (though native features like Expo AV are better tested on devices).
+The app talks to the machine serving the Metro bundle on port 3000, so no IP
+configuration is needed. See `frontend/.env.example` to override.
 
-### 🖥️ Backend: Future Server
+## Checks
 
-Once you have your streamable links ready, we can implement the backend here.
+```bash
+cd backend && npm run typecheck && npm test     # smoke test: dedup, priority, expired-URL recovery
+cd frontend && npm run typecheck
+```
 
----
+In development the Metro console prints `[perf] tap→audio …ms` per play, and
+Settings shows the last measurement plus backend health and cache stats.
 
-## 🛠️ Tech Stack Overview
+## API
 
-- **TypeScript**: Ensuring type-safe code throughout the application.
-- **Node.js**: The backbone for both frontend tooling and future backend.
-- **Zustand**: Managing the "Player State" (What's playing, current time, playlist).
-- **Axios**: Communicating with your backend source.
+| Route | Purpose |
+|---|---|
+| `GET /health` | yt-dlp status, search mode, cache stats |
+| `GET /api/music/search?q=` | search results (24 h cache) |
+| `GET /api/music/url/:videoId` | resolve + cache a stream (`{url, expiresAt, duration}`) |
+| `GET /api/music/stream/:videoId` | audio proxy with Range support and expired-URL recovery |
+| `POST /api/music/prefetch` | `{ids: string[], priority: 'next' \| 'warm'}` — returns 202 immediately |
 
----
+## Known limits
 
-## 🔧 Roadmap
-- [ ] Implement backend server with music metadata.
-- [ ] Connect `PlayerScreen` to a real stream.
-- [ ] Add "Library" persistence for offline mode.
-- [ ] Implement advanced Search functionality.
+* Downloads run only while the app is open (no Android foreground service for
+  file transfers in this Expo setup); interrupted downloads resume on next launch.
+* Lock-screen controls expose play/pause and seek; expo-audio's Android media
+  session does not forward next/previous.
+* Search falls back to yt-dlp (~1.5–3 s) when no YouTube Data API key is set.
