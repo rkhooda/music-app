@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AppChrome } from './src/components/AppChrome';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { useDownloadsStore } from './src/store/downloads.store';
+import './src/store/settings.store';
 import { useTheme } from './src/theme';
 
 const queryClient = new QueryClient({

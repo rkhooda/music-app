@@ -53,6 +53,11 @@ npx expo start           # afterwards
 The app talks to the machine serving the Metro bundle on port 3000, so no IP
 configuration is needed. See `frontend/.env.example` to override.
 
+## Running without the laptop
+
+See [DEPLOY.md](./DEPLOY.md): the backend on an old Android phone (Termux), reached
+through Tailscale, and the app pointed at it from **Settings → Backend → Address**.
+
 ## Checks
 
 ```bash

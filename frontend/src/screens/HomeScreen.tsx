@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { CloudOff, Search, Sparkles } from 'lucide-react-native';
-import { API_ORIGIN, describeError, searchMusic } from '../api/client';
+import { describeError, getApiOrigin, searchMusic } from '../api/client';
 import { EmptyState } from '../components/EmptyState';
 import { TrackActionsSheet } from '../components/TrackActionsSheet';
 import { TrackRow } from '../components/TrackRow';
@@ -114,7 +114,7 @@ const HomeScreen = () => {
             tone="error"
             icon={<CloudOff size={28} color={theme.colors.danger} strokeWidth={1.8} />}
             title="Backend unreachable"
-            message={`${describeError(suggestions.error)}\n${API_ORIGIN}`}
+            message={`${describeError(suggestions.error)}\n${getApiOrigin()}`}
             actionLabel="Try again"
             onAction={() => void suggestions.refetch()}
           />

@@ -49,10 +49,20 @@ const resolveBaseUrl = (): string => {
   return Platform.OS === 'android' ? `http://10.0.2.2:${DEFAULT_PORT}` : `http://localhost:${DEFAULT_PORT}`;
 };
 
-export const API_ORIGIN = resolveBaseUrl();
-export const API_BASE_URL = `${API_ORIGIN}${API_PATH}`;
+const AUTO_ORIGIN = resolveBaseUrl();
+let originOverride: string | null = null;
 
-if (__DEV__) console.log(`[api] base url ${API_BASE_URL} (${Platform.OS})`);
+/** Set from the persisted Settings store; null means auto-detect. */
+export const setApiOriginOverride = (origin: string | null) => {
+  originOverride = origin;
+  if (__DEV__) console.log(`[api] origin ${getApiOrigin()} (${origin ? 'settings' : 'auto'})`);
+};
+
+export const getApiOrigin = () => originOverride ?? AUTO_ORIGIN;
+export const getAutoApiOrigin = () => AUTO_ORIGIN;
+const getApiBaseUrl = () => `${getApiOrigin()}${API_PATH}`;
+
+if (__DEV__) console.log(`[api] auto origin ${AUTO_ORIGIN} (${Platform.OS})`);
 
 export class ApiError extends Error {
   constructor(
@@ -67,7 +77,7 @@ export class ApiError extends Error {
 
 export const describeError = (error: unknown): string => {
   if (error instanceof ApiError) {
-    if (error.kind === 'network') return `Can't reach the backend at ${API_ORIGIN}. Is it running on the same Wi‑Fi?`;
+    if (error.kind === 'network') return `Can't reach the backend at ${getApiOrigin()}. Is it running and reachable from this phone?`;
     if (error.kind === 'timeout') return 'The backend took too long to respond.';
     return error.message;
   }
@@ -95,7 +105,7 @@ const request = async <T>(path: string, options: RequestOptions = {}): Promise<T
   signal?.addEventListener('abort', onOuterAbort);
 
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
+    const response = await fetch(`${getApiBaseUrl()}${path}`, {
       method,
       headers: body ? { 'content-type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
@@ -159,7 +169,7 @@ export const prefetchStreams = (videoIds: string[], priority: 'next' | 'warm' = 
   return request('/prefetch', { method: 'POST', body: { ids, priority }, timeoutMs: 5_000 }).catch(() => undefined);
 };
 
-export const streamUri = (videoId: string) => `${API_BASE_URL}/stream/${videoId}`;
+export const streamUri = (videoId: string) => `${getApiBaseUrl()}/stream/${videoId}`;
 
 export interface BackendHealth {
   status: string;
@@ -172,7 +182,7 @@ export const fetchHealth = async (): Promise<BackendHealth> => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetch(`${API_ORIGIN}/health`, { signal: controller.signal });
+    const response = await fetch(`${getApiOrigin()}/health`, { signal: controller.signal });
     return (await response.json()) as BackendHealth;
   } finally {
     clearTimeout(timer);

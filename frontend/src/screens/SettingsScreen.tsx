@@ -1,15 +1,16 @@
-import React from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
 import Constants from 'expo-constants';
-import { API_ORIGIN, fetchHealth } from '../api/client';
+import { fetchHealth, getAutoApiOrigin } from '../api/client';
 import { DevPerfBadge } from '../components/DevPerfBadge';
 import { ScreenHeader } from '../components/ScreenHeader';
 import { useChromeInset } from '../components/AppChrome';
 import { formatBytes, pluralize } from '../lib/format';
 import { selectDownloadedBytes, selectDownloadedTracks, useDownloadsStore } from '../store/downloads.store';
 import { useSearchStore } from '../store/search.store';
+import { useSettingsStore } from '../store/settings.store';
 import { Theme, radius, shadow, spacing, type, useStyles, useTheme } from '../theme';
 
 const Row = ({ label, value, onPress, destructive }: { label: string; value?: React.ReactNode; onPress?: () => void; destructive?: boolean }) => {
@@ -40,6 +41,15 @@ const SettingsScreen = () => {
   const remove = useDownloadsStore((s) => s.remove);
   const clearSearchHistory = useSearchStore((s) => s.clearSearchHistory);
   const historyCount = useSearchStore((s) => s.searchHistory.length);
+  const backendUrl = useSettingsStore((s) => s.backendUrl);
+  const setBackendUrl = useSettingsStore((s) => s.setBackendUrl);
+  const [draftUrl, setDraftUrl] = useState(backendUrl);
+
+  const commitBackendUrl = () => {
+    const origin = setBackendUrl(draftUrl);
+    setDraftUrl(origin ?? '');
+    void health.refetch();
+  };
 
   const reachable = health.isSuccess;
   const statusColor = health.isPending ? theme.colors.inkMuted : reachable && health.data.ytDlp.ok ? theme.colors.success : theme.colors.danger;
@@ -74,7 +84,23 @@ const SettingsScreen = () => {
               </View>
             }
           />
-          <Row label="Address" value={API_ORIGIN} />
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Address</Text>
+            <TextInput
+              value={draftUrl}
+              onChangeText={setDraftUrl}
+              onBlur={commitBackendUrl}
+              onSubmitEditing={commitBackendUrl}
+              placeholder={getAutoApiOrigin()}
+              placeholderTextColor={theme.colors.inkMuted}
+              style={styles.addressInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="done"
+              accessibilityLabel="Backend address"
+            />
+          </View>
           {health.isSuccess ? (
             <>
               <Row label="Search" value={health.data.search === 'youtube-data-api' ? 'YouTube Data API' : 'yt-dlp (slower, set API key)'} />
@@ -87,9 +113,11 @@ const SettingsScreen = () => {
           ) : null}
           <Row label="Check again" onPress={() => void health.refetch()} />
         </View>
-        {health.isError ? (
-          <Text style={styles.hint}>Start the backend with `npm run dev` in backend/ and make sure this device is on the same Wi‑Fi. Override the address with EXPO_PUBLIC_API_URL.</Text>
-        ) : null}
+        <Text style={styles.hint}>
+          {backendUrl
+            ? `Using ${backendUrl}. Clear the field to auto-detect (${getAutoApiOrigin()}).`
+            : 'Auto-detecting the machine that serves the app. Enter a Tailscale or LAN address (e.g. 100.64.1.2:3000) to use a phone or server running the backend.'}
+        </Text>
 
         <Text style={styles.sectionTitle}>Storage</Text>
         <View style={styles.card}>
@@ -136,6 +164,7 @@ const makeStyles = (theme: Theme) => ({
   row: { flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const, minHeight: 48, paddingHorizontal: spacing.l, gap: spacing.l },
   rowLabel: { ...type.body, color: theme.colors.ink },
   rowValue: { ...type.footnote, color: theme.colors.inkMuted, flexShrink: 1, textAlign: 'right' as const },
+  addressInput: { flex: 1, ...type.footnote, color: theme.colors.ink, textAlign: 'right' as const, paddingVertical: 0, minHeight: 44 },
   statusWrap: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: spacing.s },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   hint: { ...type.footnote, color: theme.colors.inkMuted, paddingHorizontal: spacing.xl + spacing.s, paddingTop: spacing.s, lineHeight: 18 },
