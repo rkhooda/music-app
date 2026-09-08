@@ -1,4 +1,5 @@
 import { AudioPlayer, AudioStatus, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import Constants from 'expo-constants';
 import { create } from 'zustand';
 import { ApiError, describeError, prefetchStreams, resolveStream, streamUri } from '../api/client';
 import { perf } from '../lib/perf';
@@ -31,6 +32,12 @@ interface PlayerState {
   clearError: () => void;
 }
 
+// Expo Go never runs the expo-audio config plugin, so AudioControlsService is absent from
+// its manifest: background playback and lock screen controls fail to bind and log native
+// errors. Any real build has the service. appOwnership is the only check that separates
+// Expo Go from a dev client (executionEnvironment reports both as storeClient).
+const IS_EXPO_GO = Constants.appOwnership === 'expo';
+
 const LOAD_TIMEOUT_MS = 30_000;
 const NEXT_PREFETCH_COUNT = 2;
 
@@ -49,7 +56,7 @@ const ensureAudioMode = async () => {
   if (audioModeReady) return;
   audioModeReady = true;
   try {
-    await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' });
+    await setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: !IS_EXPO_GO, interruptionMode: 'doNotMix' });
   } catch (error) {
     console.warn('[player] audio mode', error);
   }
@@ -61,6 +68,7 @@ const clearLoadTimer = () => {
 };
 
 const setLockScreen = (audio: AudioPlayer, track: MusicTrack) => {
+  if (IS_EXPO_GO) return;
   try {
     audio.setActiveForLockScreen(
       true,
