@@ -41,14 +41,19 @@ cp .env.example .env     # add YOUTUBE_DATA_API_KEY for fast search
 npm run dev              # http://0.0.0.0:3000
 ```
 
-Frontend (Android device or emulator on the same Wi‑Fi):
+Frontend (Android device on the same Wi‑Fi). Expo SDK 57, so Expo Go from the
+Play Store works:
 
 ```bash
 cd frontend
 npm install
-npx expo run:android     # first time: builds the dev client
-npx expo start           # afterwards
+npm start                # expo start --go, then scan the QR with Expo Go
 ```
+
+Expo Go can't run the `expo-audio` foreground service, so playback stops when
+the app is backgrounded. For background audio build the dev client once
+(`npx expo run:android`, or `eas build --profile development --platform android`)
+and start it with `npx expo start` instead.
 
 The app talks to the machine serving the Metro bundle on port 3000, so no IP
 configuration is needed. See `frontend/.env.example` to override.

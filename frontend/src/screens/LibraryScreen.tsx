@@ -161,7 +161,7 @@ const makeStyles = (theme: Theme) => ({
   grid: { flexDirection: 'row' as const, flexWrap: 'wrap' as const, paddingHorizontal: spacing.xl, gap: spacing.l },
   playlistCard: { width: CARD_SIZE, gap: 4 },
   playlistArt: { marginBottom: spacing.xs, ...shadow(theme, 'soft') },
-  backdrop: { ...StyleSheet.absoluteFillObject },
+  backdrop: { ...StyleSheet.absoluteFill },
   dialogWrap: { flex: 1, justifyContent: 'center' as const, padding: spacing.xxl },
   dialog: {
     backgroundColor: theme.colors.surfaceStrong,

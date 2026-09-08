@@ -166,7 +166,7 @@ export const TrackActionsSheet = ({ track, onClose, extraActions = [], excludePl
 };
 
 const makeStyles = (theme: Theme) => ({
-  backdrop: { ...StyleSheet.absoluteFillObject },
+  backdrop: { ...StyleSheet.absoluteFill },
   sheet: {
     position: 'absolute' as const,
     left: spacing.s,
